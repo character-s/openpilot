@@ -65,6 +65,13 @@ class CarController(CarControllerBase, GasInterceptorCarController):
     self.steer_rate_counter = 0
     self.distance_button = 0
 
+    # SPC C-SDSU on UNSUPPORTED_DSU cars: the converter arms its SET-press engagement
+    # latch only while ACC_CONTROL has been received within its comms watchdog, so
+    # 0x343 must already be streaming BEFORE the driver presses SET.
+    self.sdsu_keepalive = bool(self.CP_SP.flags & ToyotaFlagsSP.SMART_DSU) and \
+                          self.CP.carFingerprint in UNSUPPORTED_DSU_CAR
+    self.pcm_cancel_frames = 0
+
     # *** start long control state ***
     self.long_pid = get_long_tune(self.CP, self.params)
     self.aego = FirstOrderFilter(0.0, 0.25, DT_CTRL * 3)
@@ -87,6 +94,10 @@ class CarController(CarControllerBase, GasInterceptorCarController):
     stopping = actuators.longControlState == LongCtrlState.stopping
     hud_control = CC.hudControl
     pcm_cancel_cmd = CC.cruiseControl.cancel
+    # controlsd.py:174: cancel = cruiseState.enabled and not enabled — glitches true for
+    # 1-3 frames between CRUISE_ACTIVE rising and selfdriveState.enabled propagating.
+    # Debounce so the keepalive cannot unlatch the SDSU at the engagement instant.
+    self.pcm_cancel_frames = self.pcm_cancel_frames + 1 if pcm_cancel_cmd else 0
     lat_active = CC.latActive and abs(CS.out.steeringTorque) < MAX_USER_TORQUE
 
     if len(CC.orientationNED) == 3:
@@ -270,8 +281,17 @@ class CarController(CarControllerBase, GasInterceptorCarController):
         pcm_accel_cmd = float(np.clip(pcm_accel_cmd, self.params.ACCEL_MIN, self.params.ACCEL_MAX))
 
         main_accel_cmd = 0. if self.CP.flags & ToyotaFlags.SECOC.value else pcm_accel_cmd
-        can_sends.append(toyotacan.create_accel_command(self.packer, main_accel_cmd, pcm_cancel_cmd, self.permit_braking, self.standstill_req, lead,
+        if CC.longActive:
+          can_sends.append(toyotacan.create_accel_command(self.packer, main_accel_cmd, pcm_cancel_cmd, self.permit_braking, self.standstill_req, lead,
                                                         CS.acc_type, fcw_alert, self.distance_button))
+        elif self.sdsu_keepalive:
+          # Inactive ACC_CONTROL keepalive: ACCEL_CMD=0 is the panda's inactive accel and is
+          # allowed to TX while controls_allowed is false, so this streams from boot. The SDSU
+          # arms on the driver's SET press and raises factory cruise via its 0x283 conversion;
+          # CRUISE_ACTIVE=1 then enables openpilot through the stock pcmCruise/pcmEnable path.
+          cancel = pcm_cancel_cmd and self.pcm_cancel_frames > 50
+          can_sends.append(toyotacan.create_accel_command(self.packer, 0., cancel, True, False, lead,
+                                                          CS.acc_type, False, 0))
         if self.CP.flags & ToyotaFlags.SECOC.value:
           acc_cmd_2 = toyotacan.create_accel_command_2(self.packer, pcm_accel_cmd)
           acc_cmd_2 = add_mac(self.secoc_key,

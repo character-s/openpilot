@@ -218,6 +218,11 @@ class CarState(CarStateBase, CarStateExt):
     pt_messages = [
       ("BLINKERS_STATE", float('nan')),
     ]
+    if CP.carFingerprint in UNSUPPORTED_DSU_CAR:
+      # GS_F: 0x365 (DSU_CRUISE) is not stable at 5Hz through the SDSU; exempt it from the
+      # CANParser liveness check (nan -> ignore_alive) so its dropout can't trip CS.canValid=False
+      # -> canError -> immediateDisable. Value is still read every frame; only liveness is relaxed.
+      pt_messages.append(("DSU_CRUISE", float('nan')))
 
     cam_messages = [
       ("RSA1", 0),
