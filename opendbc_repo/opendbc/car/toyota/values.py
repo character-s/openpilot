@@ -49,6 +49,12 @@ class CarControllerParams:
       self.STEER_DELTA_UP = 10       # 1.5s time to peak torque
       self.STEER_DELTA_DOWN = 25     # always lower than 45 otherwise the Rav4 faults (Prius seems ok with 50)
 
+    # Stage 1 (B): LEXUS_GS_F raised limits, mirrored in panda safety via RAISED_STEER_LIMITS
+    if CP.carFingerprint == CAR.LEXUS_GS_F and CP.lateralTuning.which() == 'torque':
+      self.STEER_MAX = 1500
+      self.STEER_ERROR_MAX = 600
+      self.STEER_DELTA_UP = 20
+
 
 class ToyotaSafetyFlags(IntFlag):
   # first byte is for EPS scaling factor
@@ -56,6 +62,7 @@ class ToyotaSafetyFlags(IntFlag):
   STOCK_LONGITUDINAL = (2 << 8)
   LTA = (4 << 8)
   SECOC = (8 << 8)
+  RAISED_STEER_LIMITS = (16 << 8)
 
 
 class ToyotaFlags(IntFlag):

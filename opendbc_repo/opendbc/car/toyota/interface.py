@@ -33,6 +33,10 @@ class CarInterface(CarInterfaceBase):
     if DBC[candidate][Bus.pt] == "toyota_new_mc_pt_generated":
       ret.safetyConfigs[0].safetyParam |= ToyotaSafetyFlags.ALT_BRAKE.value
 
+    # Stage 1 (D): LEXUS_GS_F raised torque steering limits (panda mirror in toyota.h)
+    if candidate == CAR.LEXUS_GS_F:
+      ret.safetyConfigs[0].safetyParam |= ToyotaSafetyFlags.RAISED_STEER_LIMITS.value
+
     if ret.flags & ToyotaFlags.SECOC.value:
       ret.secOcRequired = True
       ret.safetyConfigs[0].safetyParam |= ToyotaSafetyFlags.SECOC.value
@@ -115,6 +119,15 @@ class CarInterface(CarInterfaceBase):
     # min speed to enable ACC. if car can do stop and go, then set enabling speed
     # to a negative value, so it won't matter.
     ret.minEnableSpeed = -1. if stop_and_go else MIN_ACC_SPEED
+
+    # LEXUS_GS_F (TSS-P) stop tuning: apply TSS2 stopping params so approach-to-stop is
+    # smooth instead of the coarse default (creep past line, then late hard brake). 2026-07-12
+    if candidate == CAR.LEXUS_GS_F:
+      ret.vEgoStopping = 0.25
+      ret.vEgoStarting = 0.25
+      ret.stoppingDecelRate = 0.3
+      ret.longitudinalActuatorDelay = 0.05  # hybrid quick response
+
 
     if candidate in TSS2_CAR:
       ret.flags |= ToyotaFlags.RAISED_ACCEL_LIMIT.value

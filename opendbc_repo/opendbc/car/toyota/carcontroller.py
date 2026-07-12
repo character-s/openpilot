@@ -37,9 +37,13 @@ MAX_STEER_RATE_FRAMES = 17  # tx control frames needed before torque can be cut
 # EPS allows user torque above threshold for 50 frames before permanently faulting
 MAX_USER_TORQUE = 500
 
+# Suppress at most two inactive keepalive CANCEL_REQ transmissions after the
+# cruise-active rising edge. At 100 Hz control and frame % 3 TX, this is <= 60 ms.
+SDSU_ENGAGE_CANCEL_SUPPRESS_TX = 2
+
 
 def get_long_tune(CP, params):
-  if CP.carFingerprint in TSS2_CAR:
+  if CP.carFingerprint in TSS2_CAR or CP.carFingerprint == CAR.LEXUS_GS_F:
     kiBP = [2., 5.]
     kiV = [0.5, 0.25]
   else:
@@ -65,12 +69,16 @@ class CarController(CarControllerBase, GasInterceptorCarController):
     self.steer_rate_counter = 0
     self.distance_button = 0
 
-    # SPC C-SDSU on UNSUPPORTED_DSU cars: the converter arms its SET-press engagement
-    # latch only while ACC_CONTROL has been received within its comms watchdog, so
-    # 0x343 must already be streaming BEFORE the driver presses SET.
-    self.sdsu_keepalive = bool(self.CP_SP.flags & ToyotaFlagsSP.SMART_DSU) and \
-                          self.CP.carFingerprint in UNSUPPORTED_DSU_CAR
-    self.pcm_cancel_frames = 0
+    # GS custom sDSU v13.25-derived firmware uses checksum-valid ACC_CONTROL
+    # reception as the freshness source for its 0x283 generator. Scope this
+    # workaround to the verified GS port and alpha-long ownership mode.
+    self.sdsu_keepalive = (
+      self.CP.openpilotLongitudinalControl and
+      self.CP.carFingerprint == CAR.LEXUS_GS_F and
+      bool(self.CP_SP.flags & ToyotaFlagsSP.SMART_DSU)
+    )
+    self.sdsu_prev_cruise_enabled = False
+    self.sdsu_cancel_suppress_tx = 0
 
     # *** start long control state ***
     self.long_pid = get_long_tune(self.CP, self.params)
@@ -94,10 +102,17 @@ class CarController(CarControllerBase, GasInterceptorCarController):
     stopping = actuators.longControlState == LongCtrlState.stopping
     hud_control = CC.hudControl
     pcm_cancel_cmd = CC.cruiseControl.cancel
-    # controlsd.py:174: cancel = cruiseState.enabled and not enabled — glitches true for
-    # 1-3 frames between CRUISE_ACTIVE rising and selfdriveState.enabled propagating.
-    # Debounce so the keepalive cannot unlatch the SDSU at the engagement instant.
-    self.pcm_cancel_frames = self.pcm_cancel_frames + 1 if pcm_cancel_cmd else 0
+
+    # controlsd can briefly request cancel between CRUISE_ACTIVE rising and
+    # CC.enabled propagation. Suppress only that edge case, never every cancel.
+    if self.sdsu_keepalive:
+      cruise_enabled = CS.out.cruiseState.enabled
+      if cruise_enabled and not self.sdsu_prev_cruise_enabled and not CC.enabled:
+        self.sdsu_cancel_suppress_tx = SDSU_ENGAGE_CANCEL_SUPPRESS_TX
+      elif CC.enabled:
+        self.sdsu_cancel_suppress_tx = 0
+      self.sdsu_prev_cruise_enabled = cruise_enabled
+
     lat_active = CC.latActive and abs(CS.out.steeringTorque) < MAX_USER_TORQUE
 
     if len(CC.orientationNED) == 3:
@@ -277,7 +292,8 @@ class CarController(CarControllerBase, GasInterceptorCarController):
         elif net_acceleration_request_min > 0.3:
           self.permit_braking = False
 
-        pcm_accel_cmd = pcm_accel_cmd if self.CP.carFingerprint in TSS2_CAR else actuators.accel
+        pcm_accel_cmd = pcm_accel_cmd if (self.CP.carFingerprint in TSS2_CAR or
+                                          self.CP.carFingerprint == CAR.LEXUS_GS_F) else actuators.accel
         pcm_accel_cmd = float(np.clip(pcm_accel_cmd, self.params.ACCEL_MIN, self.params.ACCEL_MAX))
 
         main_accel_cmd = 0. if self.CP.flags & ToyotaFlags.SECOC.value else pcm_accel_cmd
@@ -285,13 +301,16 @@ class CarController(CarControllerBase, GasInterceptorCarController):
           can_sends.append(toyotacan.create_accel_command(self.packer, main_accel_cmd, pcm_cancel_cmd, self.permit_braking, self.standstill_req, lead,
                                                         CS.acc_type, fcw_alert, self.distance_button))
         elif self.sdsu_keepalive:
-          # Inactive ACC_CONTROL keepalive: ACCEL_CMD=0 is the panda's inactive accel and is
-          # allowed to TX while controls_allowed is false, so this streams from boot. The SDSU
-          # arms on the driver's SET press and raises factory cruise via its 0x283 conversion;
-          # CRUISE_ACTIVE=1 then enables openpilot through the stock pcmCruise/pcmEnable path.
-          cancel = pcm_cancel_cmd and self.pcm_cancel_frames > 50
-          can_sends.append(toyotacan.create_accel_command(self.packer, 0., cancel, True, False, lead,
-                                                          CS.acc_type, False, 0))
+          suppress_cancel = pcm_cancel_cmd and self.sdsu_cancel_suppress_tx > 0
+          cancel = pcm_cancel_cmd and not suppress_cancel
+          if self.sdsu_cancel_suppress_tx > 0:
+            self.sdsu_cancel_suppress_tx -= 1
+
+          # Neutral ACC_CONTROL heartbeat. This begins only after CarController
+          # initialization; the carstate 10 Hz timeout basis covers pre-init. Keep
+          # all non-acceleration fields aligned with the normal Toyota TX path.
+          can_sends.append(toyotacan.create_accel_command(self.packer, 0., cancel, self.permit_braking, self.standstill_req, lead,
+                                                          CS.acc_type, fcw_alert, self.distance_button))
         if self.CP.flags & ToyotaFlags.SECOC.value:
           acc_cmd_2 = toyotacan.create_accel_command_2(self.packer, pcm_accel_cmd)
           acc_cmd_2 = add_mac(self.secoc_key,

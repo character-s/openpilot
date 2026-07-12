@@ -76,7 +76,11 @@ class LongControl:
       output_accel = self.last_output_accel
       if output_accel > self.CP.stopAccel:
         output_accel = min(output_accel, 0.0)
-        output_accel -= self.CP.stoppingDecelRate * DT_CTRL
+        # GS 450h stationary-SET patch (2026-07-07): when already at standstill there is
+        # nothing to stop smoothly - ramp fast to hold force so creep does not move the car
+        # (stock stoppingDecelRate=0.8 takes 2.5s to reach stopAccel=-2.0; 5.0 takes 0.4s)
+        decel_rate = 5.0 if CS.standstill else self.CP.stoppingDecelRate
+        output_accel -= decel_rate * DT_CTRL
       self.reset()
 
     elif self.long_control_state == LongCtrlState.starting:
