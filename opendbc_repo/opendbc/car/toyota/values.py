@@ -53,7 +53,7 @@ class CarControllerParams:
     if CP.carFingerprint == CAR.LEXUS_GS_F and CP.lateralTuning.which() == 'torque':
       self.STEER_MAX = 1500
       self.STEER_ERROR_MAX = 600
-      self.STEER_DELTA_UP = 20
+      self.STEER_DELTA_UP = 10  # 07-13: 20->10 limit cycle 切り分け (1.8Hz purupuru)
 
 
 class ToyotaSafetyFlags(IntFlag):
