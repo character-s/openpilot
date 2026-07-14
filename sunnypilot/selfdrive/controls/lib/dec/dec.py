@@ -177,6 +177,7 @@ class DynamicExperimentalController:
     self._v_ego_kph = 0.0
     self._v_cruise_kph = 0.0
     self._has_standstill = False
+    self._lead_departing = False
     self._mpc_fcw_crash_cnt = 0
     self._standstill_count = 0
     # debug
@@ -209,6 +210,9 @@ class DynamicExperimentalController:
     self._v_ego_kph = car_state.vEgo * 3.6
     self._v_cruise_kph = car_state.vCruise
     self._has_standstill = car_state.standstill
+
+    # launch fix: lead pulling away while we hold standstill (e.g. green-light queue departure)
+    self._lead_departing = bool(lead_one.status) and float(lead_one.vLead) > 1.0 and float(lead_one.dRel) < 12.0
 
     # standstill detection
     if self._has_standstill:
@@ -358,9 +362,13 @@ class DynamicExperimentalController:
         self._mode_manager.request_mode('blended', confidence=confidence)
       return
 
-    # Standstill: use blended
+    # Standstill: use blended, unless the lead is pulling away - then hand back to ACC
+    # so the MPC can launch (factory DRCC-like follow-the-lead start)
     if self._standstill_count > 3:
-      self._mode_manager.request_mode('blended', confidence=0.9)
+      if getattr(self, '_lead_departing', False):
+        self._mode_manager.request_mode('acc', confidence=1.0)
+      else:
+        self._mode_manager.request_mode('blended', confidence=0.9)
       return
 
     # Driving slow: use ACC (but not if actively slowing down)
