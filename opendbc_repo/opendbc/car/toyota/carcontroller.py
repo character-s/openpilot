@@ -292,8 +292,14 @@ class CarController(CarControllerBase, GasInterceptorCarController):
         elif net_acceleration_request_min > 0.3:
           self.permit_braking = False
 
-        pcm_accel_cmd = pcm_accel_cmd if (self.CP.carFingerprint in TSS2_CAR or
-                                          self.CP.carFingerprint == CAR.LEXUS_GS_F) else actuators.accel
+        if self.CP.carFingerprint in TSS2_CAR:
+          pass
+        elif self.CP.carFingerprint == CAR.LEXUS_GS_F:
+          # creep band (v<0.5): fade out PCM compensation to avoid limit cycle vs creep torque
+          _comp_frac = float(np.interp(CS.out.vEgo, [0.5, 1.0], [0.0, 1.0]))
+          pcm_accel_cmd = actuators.accel + (pcm_accel_cmd - actuators.accel) * _comp_frac
+        else:
+          pcm_accel_cmd = actuators.accel
         pcm_accel_cmd = float(np.clip(pcm_accel_cmd, self.params.ACCEL_MIN, self.params.ACCEL_MAX))
 
         main_accel_cmd = 0. if self.CP.flags & ToyotaFlags.SECOC.value else pcm_accel_cmd
