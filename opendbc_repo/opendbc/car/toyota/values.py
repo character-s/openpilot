@@ -52,7 +52,7 @@ class CarControllerParams:
     # Stage 1 (B): LEXUS_GS_F raised limits, mirrored in panda safety via RAISED_STEER_LIMITS
     if CP.carFingerprint == CAR.LEXUS_GS_F and CP.lateralTuning.which() == 'torque':
       self.STEER_MAX = 1500
-      self.STEER_ERROR_MAX = 750  # Stage 3 (07-14): 600->750, panda mirror 8311ef6e
+      self.STEER_ERROR_MAX = 900  # Stage 4 (07-16): 750->900, panda mirror b9749d40
       self.STEER_DELTA_UP = 15  # 07-13: 20->15 (torque tune default 復帰) limit cycle 切り分け
 
 

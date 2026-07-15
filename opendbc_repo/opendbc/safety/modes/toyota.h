@@ -216,14 +216,14 @@ static bool toyota_tx_hook(const CANPacket_t *msg) {
     .has_steer_req_tolerance = true,
   };
 
-  // LEXUS_GS_F raised limits (Stage 3, 2026-07-14): ERROR_MAX 750 (curve headroom, EPS 1500 hard
+  // LEXUS_GS_F raised limits (Stage 4, 2026-07-16): ERROR_MAX 900 (low/mid-speed curve headroom; EPS 1500 hard
   // limit confirmed so max_torque stays as upper bound only). DELTA_UP <= 25 allowed.
   // max_rt_delta: 100Hz x 250ms = 25 frames x 25 = 625, +20% buffer = 750
   const TorqueSteeringLimits TOYOTA_GS_F_TORQUE_STEERING_LIMITS = {
     .max_torque = 1800,
     .max_rate_up = 25,
     .max_rate_down = 25,
-    .max_torque_error = 750,
+    .max_torque_error = 900,
     .max_rt_delta = 750,
     .type = TorqueMotorLimited,
     .min_valid_request_frames = 17,
