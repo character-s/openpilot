@@ -212,7 +212,7 @@ class DynamicExperimentalController:
     self._has_standstill = car_state.standstill
 
     # launch fix: lead pulling away while we hold standstill (e.g. green-light queue departure)
-    self._lead_departing = bool(lead_one.status) and float(lead_one.vLead) > 1.0 and float(lead_one.dRel) < 12.0
+    self._lead_departing = bool(lead_one.status) and float(lead_one.vLead) > 1.0 and float(lead_one.dRel) < 20.0
 
     # standstill detection
     if self._has_standstill:
