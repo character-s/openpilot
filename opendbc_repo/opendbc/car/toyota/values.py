@@ -54,6 +54,7 @@ class CarControllerParams:
       self.STEER_MAX = 1500
       self.STEER_ERROR_MAX = 900  # Stage 4 (07-16): 750->900, panda mirror b9749d40
       self.STEER_DELTA_UP = 15  # 07-13: 20->15 (torque tune default 復帰) limit cycle 切り分け
+      self.STEER_DELTA_DOWN = 40  # Stage 5 (07-17): 25->40 low-speed overshoot unwind, panda mirror 33a3c868 (rt_delta 1200)
 
 
 class ToyotaSafetyFlags(IntFlag):
