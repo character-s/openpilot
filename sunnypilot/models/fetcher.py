@@ -5,6 +5,8 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 
+import json
+import os
 import time
 
 import requests
@@ -154,23 +156,36 @@ class ModelFetcher:
 
     return None
 
+  def _merge_custom_bundles(self, bundles: list[custom.ModelManagerSP.ModelBundle]) -> list[custom.ModelManagerSP.ModelBundle]:
+    """Appends locally-defined bundles (/data/media/0/models/custom_bundles.json) so they show in the selector UI"""
+    custom_path = "/data/media/0/models/custom_bundles.json"
+    try:
+      if os.path.exists(custom_path):
+        with open(custom_path) as f:
+          for b in json.load(f):
+            bundles = [x for x in bundles if x.index != b.get("index")]
+            bundles.append(custom.ModelManagerSP.ModelBundle(**b))
+    except Exception:
+      cloudlog.exception("Failed to merge custom model bundles")
+    return bundles
+
   def get_available_bundles(self) -> list[custom.ModelManagerSP.ModelBundle]:
     """Gets the list of available models, with smart cache handling"""
     cached_data, is_expired = self.model_cache.get()
 
     if cached_data and not is_expired:
       cloudlog.debug("Using valid cached models data")
-      return self.model_parser.parse_models(cached_data)
+      return self._merge_custom_bundles(self.model_parser.parse_models(cached_data))
 
     fetched_bundles = self._fetch_and_cache_models()
     if fetched_bundles is not None:
-      return fetched_bundles
+      return self._merge_custom_bundles(fetched_bundles)
 
     if not cached_data:
       cloudlog.warning("Failed to fetch fresh data and no cache available")
 
     cloudlog.warning("Failed to fetch fresh data. Using expired cache as fallback")
-    return self.model_parser.parse_models(cached_data)
+    return self._merge_custom_bundles(self.model_parser.parse_models(cached_data))
 
 if __name__ == "__main__":
   params = Params()

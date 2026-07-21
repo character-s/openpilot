@@ -328,6 +328,9 @@ def main(demo=False):
     if "lateral_control_params" in model.numpy_inputs.keys():
       inputs['lateral_control_params'] = np.array([v_ego, lat_delay], dtype=np.float32)
 
+    if "action_t" in model.numpy_inputs.keys():  # RL models (deep_rl3+) take [lat, long] action horizons
+      inputs['action_t'] = np.array([lat_delay + DT_MDL, long_delay + DT_MDL], dtype=np.float32)
+
     mt1 = time.perf_counter()
     model_output = model.run(bufs, transforms, inputs, prepare_only)
     mt2 = time.perf_counter()

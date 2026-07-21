@@ -103,7 +103,7 @@ class ModelsLayoutMici(NavScroller):
     folder_buttons.append(default_btn)
 
     for folder in sorted(folders.keys(), key=lambda f: max((bundle.index for bundle in folders[f]), default=-1), reverse=True):
-      if folder.lower() in ["release models", "master models", "favorites"]:
+      if folder.lower() in ["release models", "master models", "favorites", "custom models"]:
         btn = BigButton(folder.lower())
         btn.set_click_callback(lambda f=folder: self._select_folder(f))
         if folder.lower() == "favorites":
