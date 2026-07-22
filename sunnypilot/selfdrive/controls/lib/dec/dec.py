@@ -212,7 +212,9 @@ class DynamicExperimentalController:
     self._has_standstill = car_state.standstill
 
     # launch fix: lead pulling away while we hold standstill (e.g. green-light queue departure)
-    self._lead_departing = bool(lead_one.status) and float(lead_one.vLead) > 1.0 and float(lead_one.dRel) < 20.0
+    # v3: vLead threshold 1.0 -> 0.5 — slow creeping departures (vLead<1.0 for 3.5s
+    # in cf/seg77) kept the fix from firing; dRel<20 gate still rejects cross traffic
+    self._lead_departing = bool(lead_one.status) and float(lead_one.vLead) > 0.5 and float(lead_one.dRel) < 20.0
 
     # standstill detection
     if self._has_standstill:
@@ -351,6 +353,15 @@ class DynamicExperimentalController:
       self._mode_manager.request_mode('acc', confidence=1.0)
       return
 
+    # launch fix v3: while the lead is physically pulling away from a standstill,
+    # follow it (ACC/MPC) BEFORE the slow_down branch can claim the frame.
+    # cf/seg77: slow_down held blended for ~4s while the lead kept departing.
+    # If the lead re-stops, _lead_departing drops (vLead gate) and slow_down
+    # logic resumes — MPC stops on dRel regardless, so this stays fail-safe.
+    if self._standstill_count > 3 and getattr(self, '_lead_departing', False):
+      self._mode_manager.request_mode('acc', confidence=1.0)
+      return
+
     # Slow down scenarios: emergency for high urgency, normal for lower urgency
     if self._has_slow_down:
       if self._urgency > 0.7:
@@ -362,13 +373,9 @@ class DynamicExperimentalController:
         self._mode_manager.request_mode('blended', confidence=confidence)
       return
 
-    # Standstill: use blended, unless the lead is pulling away - then hand back to ACC
-    # so the MPC can launch (factory DRCC-like follow-the-lead start)
+    # Standstill: use blended (lead-departing case handled above)
     if self._standstill_count > 3:
-      if getattr(self, '_lead_departing', False):
-        self._mode_manager.request_mode('acc', confidence=1.0)
-      else:
-        self._mode_manager.request_mode('blended', confidence=0.9)
+      self._mode_manager.request_mode('blended', confidence=0.9)
       return
 
     # Driving slow: use ACC (but not if actively slowing down)
