@@ -123,9 +123,9 @@ class CarInterface(CarInterfaceBase):
     # LEXUS_GS_F (TSS-P) stop tuning: apply TSS2 stopping params so approach-to-stop is
     # smooth instead of the coarse default (creep past line, then late hard brake). 2026-07-12
     if candidate == CAR.LEXUS_GS_F:
-      ret.vEgoStopping = 0.25
+      ret.vEgoStopping = 0.4
       ret.vEgoStarting = 0.25
-      ret.stoppingDecelRate = 0.3
+      ret.stoppingDecelRate = 0.2
       ret.longitudinalActuatorDelay = 0.05  # hybrid quick response
 
 
