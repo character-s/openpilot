@@ -52,6 +52,27 @@ SETTLED_TRIM_TBL = [
     [0.062, 0.049, 0.055,  0.029],            # >61km/h    (106.6 / 105.1 / 105.8 / 103.0%)
 ]
 
+# ★ 07-31: e_y (車線中心復元) feedback。FF trim は追従の校正であって、平衡点が車線中心より
+# 0.18-0.44m イン側に居る問題は動かせない (07-30 実車確認: trim ±8% でも「線を踏みそう/
+# はみ出し傾向は不変」)。平衡点を動かせるのは位置フィードバックだけなので、車線中心からの
+# ずれ e_y を setpoint に注入する。
+# - 注入先は _setpoint のみ (desired 系は触らない)。FF/settled trim/残差面測定と完全分離、
+#   「位置は error 経路の担当」の分業を守る。効きは NN 勾配 × PID (定常は I) 経由 = 時定数
+#   数秒の遅いループ = 位置制御として適切な帯域。
+# - パラメータは shadow スイープで選定 (archive/probes/_lane_analysis.py --only=feedback、
+#   f4-ff 10 route / n=151,342 / 踏み 1,301 件)。K=0.6/dz=0.05 で 0.35m イン寄り時 0.18 m/s²
+#   の打ち消し。踏み時正答 76.8% (逆符号に書くと 14% = 符号系はデータ実証済み)。
+# - 生 offset の Δp95 0.023 が門値 0.02 を僅かに超えるため LPF (RC 0.3s) を挟む。
+# - 中央線なし対面通行 (path が道路中央へ寄る場面) の gating は初版では入れない
+#   (user 07-31: 様子見で必要なら)。prob/幅/速度の門が怪しい白線をある程度自然に切る。
+EY_K = 0.6              # [m/s^2 per m] 復元ゲイン
+EY_DEADZONE = 0.05      # [m] このずれ以下は補正しない
+EY_LIMIT = 0.35         # [m/s^2] 補正上限
+EY_V_MIN = 8.0          # [m/s] 低速は白線が視野から外れやすい
+EY_PROB_MIN = 0.5       # 両側 laneLineProb の門
+EY_WIDTH_MIN, EY_WIDTH_MAX = 2.4, 4.2   # [m] 車線幅の妥当性門
+EY_LPF_RC = 0.3         # [s]
+
 
 # At a given roll, if pitch magnitude increases, the
 # gravitational acceleration component starts pointing
@@ -93,6 +114,9 @@ class NeuralNetworkLateralControl(LatControlTorqueExtBase):
     # settled FF trim の状態 (同符号カーブの継続時間と符号)
     self._settled_time = 0.0
     self._settled_sign = 0.0
+
+    # e_y feedback の LPF (白線検出ノイズ/跳び対策)
+    self.ey_filter = FirstOrderFilter(0.0, EY_LPF_RC, 0.01)
 
   @property
   def _nnlc_enabled(self):
@@ -136,6 +160,20 @@ class NeuralNetworkLateralControl(LatControlTorqueExtBase):
     low_speed_factor = float(np.interp(CS.vEgo, LOW_SPEED_X, LOW_SPEED_Y)) ** 2
     self._setpoint = self._desired_lateral_accel + low_speed_factor * self._desired_curvature
     self._measurement = self._actual_lateral_accel + low_speed_factor * self._actual_curvature
+
+    # e_y: 車線中心からのずれを setpoint に注入して平衡点を中心へ引き戻す。
+    # offset = (yl+yr)/2、正 = 中心が右 (laneLines y は右正)。中心が右なら右へ寄せる = 正の la。
+    # laneLines y 系と curvature/la 系が同符号規約であることは shadow の踏み正答率で実証済み。
+    ey_corr = 0.0
+    m2 = self.model_v2
+    if m2 is not None and len(m2.laneLines) >= 3 and len(m2.laneLineProbs) >= 3:
+      yl, yr = m2.laneLines[1].y, m2.laneLines[2].y
+      if len(yl) and len(yr) and float(m2.laneLineProbs[1]) > EY_PROB_MIN and float(m2.laneLineProbs[2]) > EY_PROB_MIN:
+        lane_w = float(yr[0]) - float(yl[0])
+        if EY_WIDTH_MIN < lane_w < EY_WIDTH_MAX and CS.vEgo > EY_V_MIN:
+          off = (float(yl[0]) + float(yr[0])) / 2.0
+          ey_corr = float(np.clip(sign(off) * EY_K * max(abs(off) - EY_DEADZONE, 0.0), -EY_LIMIT, EY_LIMIT))
+    self._setpoint += self.ey_filter.update(ey_corr)
 
     # update past data
     roll = params.roll
