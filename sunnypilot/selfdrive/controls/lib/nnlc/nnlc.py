@@ -65,10 +65,32 @@ SETTLED_TRIM_TBL = [
 # - 生 offset の Δp95 0.023 が門値 0.02 を僅かに超えるため LPF (RC 0.3s) を挟む。
 # - 中央線なし対面通行 (path が道路中央へ寄る場面) の gating は初版では入れない
 #   (user 07-31: 様子見で必要なら)。prob/幅/速度の門が怪しい白線をある程度自然に切る。
-EY_K = 0.6              # [m/s^2 per m] 復元ゲイン
-EY_DEADZONE = 0.05      # [m] このずれ以下は補正しない
-EY_LIMIT = 0.35         # [m/s^2] 補正上限
-EY_V_MIN = 8.0          # [m/s] 低速は白線が視野から外れやすい
+#
+# ★★ 07-31 実走で初版 (P 0.6 / limit 0.35 / deadzone のみ) の欠陥が 4 つ出たので全面改訂。
+# 実測: e_y が効く帯だけ |offset| が減り (43-61km/h で 0.183→0.108m = -41%) 方向は正しい。
+# だが同じ帯で fulfill が -4pt (29-61 95.6→92.0 / >61 100.1→95.6)、user 体感は
+# 「カーブ最初の切り方が悪い、心臓に悪い、override につながる」。原因は 2 つ:
+#  (1) limit 0.35 m/s^2 は位置制御として 1 桁過大。横位置を 0.3m 動かすのに要るのは
+#      数秒スケールで 0.02-0.07 m/s^2。0.35 は la=1.0 のカーブの 35% を削る量で、
+#      shadow の「踏み時 p50 0.28」= カーブでイン寄りになった瞬間に曲がりを 3 割削っていた。
+#      → limit/K を 1/3.5 に。位置は P でなく I で動かす (下記)。
+#  (2) 切り込み中も full gain で効いていた。e_y の目的は「平衡点の移動」なので過渡で
+#      効かせる理由がない。進入だけでなく緩→急の複合カーブでも切り込みを妨げる
+#      (user 実走報告) → 継続時間 ramp ではなく **jerk (曲率変化率) で gate** する。
+#      lookahead_lateral_jerk は先読み値なので、gate が切り込みより先に立つ。
+# 追加した I: P を下げた分、定常偏差は積分で埋める。planner のイン寄りは 07-28 の
+# drift 回帰で「自車位置に依存しない一定量」と実測済み = 定数外乱 = I の守備範囲。
+# 時定数は分オーダー (0.3m のずれが ~55s 続いて 0.05 m/s^2)。torqued の friction 推定と
+# 同じ「ゆっくり効く」思想 (user 07-31 の提案)。gate 中と白線ロスト中は凍結 (ワインドアップ防止)。
+# e_psi (減衰項) は次段。user 体感で振動は「サイドミラーで分かる程度」= 許容範囲、
+# かつ P を 1/4 にすると振れ幅自体が縮むため。それでも残るなら laneLines の傾きから入れる。
+EY_K = 0.15             # [m/s^2 per m] 復元ゲイン (P)。0.6 は切れ角を削りすぎた
+EY_DEADZONE = 0.02      # [m] リレー的な出入りが「寄って戻って」を生むので縮小
+EY_LIMIT = 0.10         # [m/s^2] P+I の合計上限。la=1.0 のカーブへの影響を 10% 以内に
+EY_KI = 0.003           # [m/s^2 per m·s] 遅い積分。0.3m×55s で 0.05 m/s^2
+EY_I_LIMIT = 0.08       # [m/s^2] I 単体の上限
+EY_GATE_JERK = [0.3, 1.0]   # |lookahead lat jerk| [m/s^3]: 0.3 以下 = 定常 → full、1.0 以上 = 切り込み → 0
+EY_V_MIN = 8.0          # [m/s] 低速は白線が視野から外れやすい (07-31 実測で通過率 45% vs 高速 74%)
 EY_PROB_MIN = 0.5       # 両側 laneLineProb の門
 EY_WIDTH_MIN, EY_WIDTH_MAX = 2.4, 4.2   # [m] 車線幅の妥当性門
 EY_LPF_RC = 0.3         # [s]
@@ -115,8 +137,9 @@ class NeuralNetworkLateralControl(LatControlTorqueExtBase):
     self._settled_time = 0.0
     self._settled_sign = 0.0
 
-    # e_y feedback の LPF (白線検出ノイズ/跳び対策)
+    # e_y feedback の LPF (白線検出ノイズ/跳び対策) と遅い積分
     self.ey_filter = FirstOrderFilter(0.0, EY_LPF_RC, 0.01)
+    self.ey_integral = 0.0
 
   @property
   def _nnlc_enabled(self):
@@ -164,15 +187,33 @@ class NeuralNetworkLateralControl(LatControlTorqueExtBase):
     # e_y: 車線中心からのずれを setpoint に注入して平衡点を中心へ引き戻す。
     # offset = (yl+yr)/2、正 = 中心が右 (laneLines y は右正)。中心が右なら右へ寄せる = 正の la。
     # laneLines y 系と curvature/la 系が同符号規約であることは shadow の踏み正答率で実証済み。
-    ey_corr = 0.0
+    ey_corr, ey_off, ey_valid = 0.0, 0.0, False
     m2 = self.model_v2
     if m2 is not None and len(m2.laneLines) >= 3 and len(m2.laneLineProbs) >= 3:
       yl, yr = m2.laneLines[1].y, m2.laneLines[2].y
       if len(yl) and len(yr) and float(m2.laneLineProbs[1]) > EY_PROB_MIN and float(m2.laneLineProbs[2]) > EY_PROB_MIN:
         lane_w = float(yr[0]) - float(yl[0])
         if EY_WIDTH_MIN < lane_w < EY_WIDTH_MAX and CS.vEgo > EY_V_MIN:
-          off = (float(yl[0]) + float(yr[0])) / 2.0
-          ey_corr = float(np.clip(sign(off) * EY_K * max(abs(off) - EY_DEADZONE, 0.0), -EY_LIMIT, EY_LIMIT))
+          ey_off = (float(yl[0]) + float(yr[0])) / 2.0
+          ey_valid = True
+
+    # gate: 切り込み中 (曲率が変化中) は e_y を落とす。平衡点を動かすのが目的なので過渡で
+    # 効かせる必要がなく、効かせると切り込みを妨げる (07-31 実走: 「突っ込んでから曲がる」)。
+    # lookahead_lateral_jerk は先読み値 = gate が切り込みより先に立つ。継続時間ベースの
+    # ramp では緩→急の複合カーブを守れないので、変化率で見るのが正しい。
+    ey_gate = float(np.interp(abs(self.lookahead_lateral_jerk), EY_GATE_JERK, [1.0, 0.0]))
+
+    # 遅い I: 定常偏差 (planner の位置非依存なイン寄り) を埋める担当。P では平衡点は動かない。
+    # 切り込み中と白線ロスト中は凍結してワインドアップを防ぐ。
+    if ey_valid and ey_gate > 0.5:
+      self.ey_integral = float(np.clip(self.ey_integral + EY_KI * ey_off * 0.01,
+                                       -EY_I_LIMIT, EY_I_LIMIT))
+    elif not ey_valid:
+      self.ey_integral *= 0.999   # 白線が長く取れない道では徐々に忘れる
+
+    if ey_valid:
+      ey_p = sign(ey_off) * EY_K * max(abs(ey_off) - EY_DEADZONE, 0.0)
+      ey_corr = float(np.clip(ey_p + self.ey_integral, -EY_LIMIT, EY_LIMIT)) * ey_gate
     self._setpoint += self.ey_filter.update(ey_corr)
 
     # update past data
