@@ -54,7 +54,7 @@ class CarControllerParams:
       self.STEER_MAX = 1500
       self.STEER_ERROR_MAX = 900  # Stage 4 (07-16): 750->900, panda mirror b9749d40
       self.STEER_DELTA_UP = 15  # 07-13: 20->15 (torque tune default 復帰) limit cycle 切り分け
-      self.STEER_DELTA_DOWN = 45  # Stage 6 (08-03): 40->45 戻し clip 32-40% の実測 (_steer_rate_hit.py) を受けて。25frame*45=1125 < rt_delta 1200 なので panda 変更不要
+      self.STEER_DELTA_DOWN = 50  # Stage 7 (08-03): 45->50。Stage 6 (45) 実走で fault ゼロ・clip 12-13.6%->8.4% を確認、45 でも残る張り付きを詰める。panda 同時変更必須 (max_rate_down 50 / max_rt_delta 1500)
 
 
 class ToyotaSafetyFlags(IntFlag):
