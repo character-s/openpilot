@@ -60,6 +60,10 @@ class CarController(CarControllerBase, GasInterceptorCarController):
     CarControllerBase.__init__(self, dbc_names, CP, CP_SP)
     GasInterceptorCarController.__init__(self, CP, CP_SP)
     self.params = CarControllerParams(self.CP)
+    # トルク帯で戻しレートを切り替える車種 (GS_F) 用。持たない車種では None = 常に固定値。
+    self.steer_delta_down_base = self.params.STEER_DELTA_DOWN
+    self.steer_delta_down_fast = getattr(self.params, 'STEER_DELTA_DOWN_FAST', None)
+    self.steer_delta_down_fast_below = getattr(self.params, 'STEER_DELTA_DOWN_FAST_BELOW', 0)
     self.last_torque = 0
     self.last_angle = 0
     self.alert_active = False
@@ -135,6 +139,13 @@ class CarController(CarControllerBase, GasInterceptorCarController):
           carlog.error("SecOC synchronization MAC mismatch, wrong key?")
 
     # *** steer torque ***
+    # GS: 戻し (unwind) レートはトルク帯で切り替える。高トルク帯では EPS が指令に追いつけず、
+    # 乖離が STEER_ERROR_MAX に達して steerFault になる (values.py の Stage 8 コメント参照)。
+    # 低トルク帯 = clip の 89.6% が集中する領域なので、そこだけ速く戻して体感を稼ぐ。
+    if self.steer_delta_down_fast is not None:
+      self.params.STEER_DELTA_DOWN = (self.steer_delta_down_fast
+                                      if abs(self.last_torque) < self.steer_delta_down_fast_below
+                                      else self.steer_delta_down_base)
     new_torque = int(round(actuators.torque * self.params.STEER_MAX))
     apply_torque = apply_meas_steer_torque_limits(new_torque, self.last_torque, CS.out.steeringTorqueEps, self.params)
 

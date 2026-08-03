@@ -54,7 +54,18 @@ class CarControllerParams:
       self.STEER_MAX = 1500
       self.STEER_ERROR_MAX = 900  # Stage 4 (07-16): 750->900, panda mirror b9749d40
       self.STEER_DELTA_UP = 15  # 07-13: 20->15 (torque tune default 復帰) limit cycle 切り分け
-      self.STEER_DELTA_DOWN = 45  # Stage 6 (08-03): 40->45 戻し clip 32-40% の実測 (_steer_rate_hit.py) を受けて。25frame*45=1125 < rt_delta 1200 なので panda 変更不要
+      # Stage 8 (08-03): 戻しレートの上限は「delta の値」ではなく **EPS の追従能力** で決まる。
+      # DELTA_DOWN=50 の実走 (95k frames) を _steer_rate_hit.py --fault-trace で解析した結果:
+      #   - |delta|=50 は fault なしで 5728 frames / 最大 30 連続 通っている = 単発値では決まらない
+      #   - 250ms 累積も clean 1250 > fault 時 375 で説明不能 = rt_delta でもない
+      #   - fault 3 件はいずれも「指令 vs EPS 実測の乖離が STEER_ERROR_MAX(900) に到達」した瞬間で、
+      #     max|torque| = 741 / 1416 / 1494 と **すべて高トルク帯**
+      #   - 一方 clip の 89.6% は |torque|<500 に集中 (40 走行でも 82%)
+      # → トルク帯で分ける。低トルク側は恩恵の 9 割を取り、高トルク側は fault 実績のある 45 に戻す。
+      # 40 (191k) / 45 (126k) の走行では走行中 fault ゼロなので 45 は実証済みの安全値。
+      self.STEER_DELTA_DOWN = 45
+      self.STEER_DELTA_DOWN_FAST = 50          # |torque| < FAST_BELOW でのみ使う
+      self.STEER_DELTA_DOWN_FAST_BELOW = 500   # fault 最小事例 741 の下に余裕を取った閾値
 
 
 class ToyotaSafetyFlags(IntFlag):
