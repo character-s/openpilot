@@ -216,17 +216,15 @@ static bool toyota_tx_hook(const CANPacket_t *msg) {
     .has_steer_req_tolerance = true,
   };
 
-  // LEXUS_GS_F raised limits (Stage 7, 2026-08-03): ERROR_MAX 900 + DELTA_DOWN 50.
-  // Stage 6 (45, car 側のみ) を実走した結果 fault ゼロ・clip 率 12-13.6% -> 8.4% で効果を確認し、
-  // 45 でもまだ戻し局面の一部が張り付いていたため 50 へ。EPS 1500 hard limit は不変
-  // (max_torque は上限のまま、45 の実走で steerFault ゼロを確認済み)。DELTA_UP <= 25。
-  // max_rt_delta: 100Hz x 250ms = 25 frames x 50 (rate_down) = 1250, +20% buffer = 1500
+  // LEXUS_GS_F raised limits (Stage 5, 2026-07-17): ERROR_MAX 900 + DELTA_DOWN 40 (faster unwind for
+  // low-speed overshoot; EPS 1500 hard limit confirmed, max_torque stays upper bound). DELTA_UP <= 25.
+  // max_rt_delta: 100Hz x 250ms = 25 frames x 40 (rate_down) = 1000, +20% buffer = 1200
   const TorqueSteeringLimits TOYOTA_GS_F_TORQUE_STEERING_LIMITS = {
     .max_torque = 1800,
     .max_rate_up = 25,
-    .max_rate_down = 50,
+    .max_rate_down = 40,
     .max_torque_error = 900,
-    .max_rt_delta = 1500,
+    .max_rt_delta = 1200,
     .type = TorqueMotorLimited,
     .min_valid_request_frames = 17,
     .max_invalid_request_frames = 1,
