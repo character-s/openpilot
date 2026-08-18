@@ -54,7 +54,8 @@ T_IDXS = np.array(T_IDXS_LST)
 FCW_IDXS = T_IDXS < 5.0
 T_DIFFS = np.diff(T_IDXS, prepend=[0.])
 COMFORT_BRAKE = 2.5
-STOP_DISTANCE = 7.5
+STOP_DISTANCE = 8.5  # GS450h PLN-1_4: MPC は設定値から実測 4.3m 食い込む (upstream 通例 2-2.5m の 2 倍) ため
+                     # 7.5 では stop_dRel p50 3.3m。位置だけを直接動かす knob (減速勾配に触らない)
 CRUISE_MIN_ACCEL = -1.2
 CRUISE_MAX_ACCEL = 1.6
 MIN_X_LEAD_FACTOR = 0.5
