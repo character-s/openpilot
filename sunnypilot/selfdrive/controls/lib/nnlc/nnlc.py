@@ -145,6 +145,15 @@ class NeuralNetworkLateralControl(LatControlTorqueExtBase):
   def _nnlc_enabled(self):
     return self.enabled and self.model_valid and self.has_nn_model
 
+  @property
+  def output_pid(self):
+    """★ NNL-8: 出力を実際に作った PID (NNLC 無効時は None = base 側)。rlog の p/i/d/f 用。
+
+    NNL-8 で PID を base と分けたので、latcontrol_torque.py が自分の self.pid を
+    そのまま logging すると出力を作っていない側の内訳が rlog に出てしまう。
+    """
+    return self._pid if self._nnlc_enabled else None
+
   def update_limits(self):
     if not self._nnlc_enabled:
       return

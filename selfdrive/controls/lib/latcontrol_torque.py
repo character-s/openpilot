@@ -108,10 +108,13 @@ class LatControlTorque(LatControl):
                                                      desired_curvature, measured_curvature, steer_limited_by_safety, output_torque)
 
       pid_log.active = True
-      pid_log.p = float(self.pid.p)
-      pid_log.i = float(self.pid.i)
-      pid_log.d = float(self.pid.d)
-      pid_log.f = float(self.pid.f)
+      # ★ NNL-8: 実際に出力を作った PID を記録する (NNLC 有効時は extension 側)。
+      # PID を分けたので self.pid をそのまま記録すると rlog の p/i/d/f 列が別物になる。
+      _lp = self.extension.output_pid or self.pid
+      pid_log.p = float(_lp.p)
+      pid_log.i = float(_lp.i)
+      pid_log.d = float(_lp.d)
+      pid_log.f = float(_lp.f)
       pid_log.output = float(-output_torque) # TODO: log lat accel?
       pid_log.actualLateralAccel = float(measurement)
       pid_log.desiredLateralAccel = float(setpoint)
