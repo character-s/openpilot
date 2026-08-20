@@ -115,7 +115,10 @@ class TinygradSplitRunner(ModelRunner):
 
     if self.off_policy_runner:
       off_policy_output = self.off_policy_runner.run_model()
-      if self.on_policy_runner:
+      # GS 08-21: on_policy が plan を出す構成 (OPM10v3 系) でだけ off_policy の plan を捨てる。
+      #   RL 系の split (OPM16D) は on_policy = action のみで plan は off_policy にしか無い —
+      #   無条件に pop すると plan が消えて fill_model_msg が KeyError で落ちる。
+      if self.on_policy_runner and 'plan' in self.on_policy_runner.output_slices:
         off_policy_output.pop('plan', None)
       outputs.update(off_policy_output)
 
