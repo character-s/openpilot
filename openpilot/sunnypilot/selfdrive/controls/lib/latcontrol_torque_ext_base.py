@@ -14,7 +14,16 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 LAT_PLAN_MIN_IDX = 5
 LATERAL_LAG_MOD = 0.0  # seconds, modifies how far in the future we look ahead for the lateral plan
 
-KP = 1.0
+# ★ NNL-8 (2026-08-15): NNLC 専用の torque 空間 P ゲイン。
+# base `latcontrol_torque.py` の KP_INTERP は **lat accel 空間**用で、lat accel = κ·v² が
+# 低速で小さくなるのを補償するために持ち上げてある (30m/s 0.8 → 1m/s 250)。
+# NNLC は同じ補償を `nnlc.py` の low_speed_factor で既に行っている (setpoint/measurement に
+# LSF·κ を加算) ため、base の PID を共有すると **低速補正が二重に掛かる** (v=3.2 で 9.1 倍)。
+# ⇒ 二重分ちょうどを相殺した表 = KP_INTERP(v)·v²/(v²+LSF(v))。
+#    LSF=0 になる v>=30m/s では現行と完全一致 = 高速側は定義上ゼロ変更。
+#    根拠と評価 = `NNL-8_README.md` / `archive/probes/_kp_design.py`
+KP_TQ_SPEEDS = [1, 1.5, 2.0, 3.0, 5, 7.5, 10, 15, 30]
+KP_TQ_INTERP = [2.01, 2.33, 2.41, 2.83, 3.54, 3.69, 3.21, 1.97, 0.80]
 KI = 0.3
 
 
@@ -61,7 +70,10 @@ class LatControlTorqueExtBase:
     self.torque_params = lac_torque.torque_params
 
     self._ff = 0.0
-    self._pid = PIDController(KP, KI)
+    # ★ NNL-8: NNLC 専用の PID インスタンス。以前は latcontrol_torque_ext.py L21 で
+    # base の PID (lat accel 空間) を `self._pid = pid` と差し込んで共有していた。
+    # rate は base (`PIDController(..., rate=1/self.dt)`, dt=DT_CTRL) と同じ 100Hz。
+    self._pid = PIDController([KP_TQ_SPEEDS, KP_TQ_INTERP], KI, rate=100)
     self._pid_log = None
     self._setpoint = 0.0
     self._measurement = 0.0

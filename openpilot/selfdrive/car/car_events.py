@@ -21,6 +21,7 @@ class CarEvents:
     self.low_speed_alert = False
     self.no_steer_warning = False
     self.silent_steer_warning = True
+    self.speed_too_high_cnt = 0  # GS 450h: debounce speedTooHigh (0.5s)
 
   def update(self, CS: car.CarState, CS_prev: car.CarState, CC: car.CarControl):
     if self.CP.brand in ('body', 'mock'):
@@ -126,7 +127,9 @@ class CarEvents:
       events.add(EventName.stockAeb)
     if CS.stockLkas:
       events.add(EventName.stockLkas)
-    if CS.vEgo > MAX_CTRL_SPEED:
+    # GS 450h: 0.5s debounce - a momentary vEgo spike used to raise speedTooHigh
+    self.speed_too_high_cnt = self.speed_too_high_cnt + 1 if CS.vEgo > MAX_CTRL_SPEED else 0
+    if self.speed_too_high_cnt >= int(0.5 / DT_CTRL):
       events.add(EventName.speedTooHigh)
     if CS.cruiseState.nonAdaptive:
       events.add(EventName.wrongCruiseMode)
