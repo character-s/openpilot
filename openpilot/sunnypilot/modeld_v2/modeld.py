@@ -7,10 +7,8 @@ See the LICENSE.md file in the root directory for more details.
 """
 
 from collections.abc import Callable
-import gc
 import os
 os.environ['GMMU'] = '0'
-from tinygrad.device import Device
 import numpy as np
 import threading
 import time
@@ -18,7 +16,7 @@ from setproctitle import setproctitle
 
 import openpilot.cereal.messaging as messaging
 from openpilot.common.hardware import COMMA_HARDWARE
-from openpilot.selfdrive.modeld.helpers import chestnut_present, wait_for_chestnut
+from openpilot.selfdrive.modeld.helpers import chestnut_present
 from openpilot.cereal import log
 from opendbc.car.structs import car
 from openpilot.cereal.services import SERVICE_LIST
@@ -26,9 +24,9 @@ from openpilot.cereal.messaging import PubMaster, SubMaster
 from openpilot.cereal.visionipc import VisionStreamType
 from msgq.visionipc import VisionIpcClient, VisionBuf
 from opendbc.car.car_helpers import get_demo_car_params
+from openpilot.common.file_chunker import open_file_chunked
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.params import Params
-from openpilot.common.hardware.usb import cable_connected
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import config_realtime_process, DT_MDL
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
@@ -44,18 +42,79 @@ from openpilot.sunnypilot.modeld_v2.meta_helper import load_meta_constants
 from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
-from openpilot.sunnypilot.modeld_v2.helpers import load_model
-from openpilot.sunnypilot.modeld_v2.frame_fusion import fused_with_warp
+from openpilot.sunnypilot.modeld_v2.helpers import load_oob
 from openpilot.sunnypilot.modeld_v2.model_adapters import get_model_adapter
 from openpilot.sunnypilot.models.helpers import get_active_bundle
 from openpilot.sunnypilot.selfdrive.controls.lib.relc import RoadEdgeLaneChangeController
 
 PROCESS_NAME = "openpilot.selfdrive.modeld.modeld_tinygrad"
-BIG_MODEL_TIMEOUT = 60
+BIG_MODEL_TIMEOUT = 150  # GS450h: measured 80.3s cold load on chestnut (2026-08-24); 60s always timed out
+
+# Cap on the bundle's "long" override, which is a first-order lag applied to the model's
+# desiredAcceleration *after* it is produced (see smooth_value in drive_helpers.py).
+# TT ships long=".3". With DT_MDL=0.05 that is alpha = 1-exp(-0.05/0.3) = 0.154, so a step to
+# 1.0 m/s^2 only reaches 0.15 in the first frame and 0.63 after 0.3s. GS 450h's
+# longitudinalActuatorDelay is 0.05s, so this filter - not the actuator and not the model -
+# dominates the onset. That is the "soft pedal every time" the driver reported (2026-08-25).
+# ⚠ This is a cap, not a fixed value: a bundle asking for less keeps its own number.
+# ⚠ modeld also feeds LONG_SMOOTH_SECONDS into long_delay, so the planner's delay
+#   compensation follows this automatically - do not compensate for it a second time.
+# 0.15 per the driver's call (2026-08-25, ".15 or .2 is fine"): step response reaches 49%
+# in 0.1s / 74% in 0.2s, vs 28%/49% at the shipped 0.3 - most of the win with less risk
+# of surging on plan noise than 0.1 would carry.
+LONG_SMOOTH_SECONDS_MAX = 0.15
+
+# tinygrad's AMD-over-USB backend guards the device with a flock on /tmp/am_usb:<bus>-<port>.lock
+# and takes it with LOCK_EX | LOCK_NB (system.py:144-148) - whoever asks second fails instantly
+# with "Failed to acquire lock file", which surfaces as "No interface for AMD:0 is available".
+# Measured 2026-08-25: two boots that decided at since_boot 34.0/34.6s loaded fine, the one that
+# decided at 35.3s lost the lock. Losing that race cost an entire drive's worth of driving model.
+# Nothing else in openpilot takes this lock (chestnut_present() and usb.py both read sysfs only),
+# so the contender is another modeld instance that has not exited yet - retrying is the fix.
+EGPU_LOAD_ATTEMPTS = 5  # total attempts, not retries
+EGPU_LOCK_RETRY_WAIT = 3.0  # [s] between attempts, well inside BIG_MODEL_TIMEOUT
+
+
+def _is_lock_contention(e: BaseException) -> bool:
+  # the real error is nested inside an ExceptionGroup, so match on the rendered text
+  return "Failed to acquire lock file" in repr(e)
+
+
+def _egpu_lock_holder() -> str:
+  """Who is holding the am_usb lock. Diagnosis only - never raises."""
+  import glob
+  import subprocess
+  try:
+    locks = glob.glob("/tmp/am_usb:*.lock")
+    if not locks:
+      return "no lock file"
+    out = subprocess.run(["fuser", "-v"] + locks, capture_output=True, text=True, timeout=5)
+    return " ".join((out.stdout + out.stderr).split())[:300] or "nobody"
+  except Exception:
+    return "unknown"
+
+
+def _load_with_retry(make_model, attempts: int = EGPU_LOAD_ATTEMPTS, wait: float = EGPU_LOCK_RETRY_WAIT):
+  """Call make_model up to `attempts` times, retrying only on am_usb lock contention.
+
+  Returns (model, error); model is None when every attempt failed."""
+  last: Exception | None = None
+  for attempt in range(1, attempts + 1):
+    try:
+      return make_model(), None
+    except Exception as e:  # an unhandled exception in the load thread would die silently
+      last = e
+      if not _is_lock_contention(e) or attempt == attempts:
+        break
+      cloudlog.warning(f"eGPU lock held (attempt {attempt}/{attempts}), retry in {wait}s (holder: {_egpu_lock_holder()})")
+      time.sleep(wait)
+  cloudlog.error(f"eGPU model load failed (lock holder: {_egpu_lock_holder()})")
+  return None, last
 
 
 def _pkl_exists(path):
-  return os.path.exists(path)
+  from openpilot.common.file_chunker import get_manifest_path
+  return os.path.exists(path) or os.path.exists(get_manifest_path(path))
 
 
 def _find_driving_pkl(bundle):
@@ -99,7 +158,7 @@ class ModelState(ModelStateBase):
     overrides = {override.key: override.value for override in model_bundle.overrides} if model_bundle else {}
 
     self.LAT_SMOOTH_SECONDS = float(overrides.get('lat', ".0"))
-    self.LONG_SMOOTH_SECONDS = float(overrides.get('long', ".0"))
+    self.LONG_SMOOTH_SECONDS = min(float(overrides.get('long', ".0")), LONG_SMOOTH_SECONDS_MAX)
     self.MIN_LAT_CONTROL_SPEED = 0.3
     self.PLANPLUS_CONTROL: float = 1.0
     self.chestnut = chestnut
@@ -110,7 +169,7 @@ class ModelState(ModelStateBase):
 
   def _init_combined(self, pkl_path, cam_w, cam_h, bundle):
     cloudlog.warning(f"loading combined pkl: {pkl_path}")
-    jits = load_model(pkl_path, extend=fused_with_warp(cam_w, cam_h, self.chestnut))
+    jits = load_oob(open_file_chunked(pkl_path))
 
     metadata = jits['metadata']
     self.WARP_DEV = metadata.get('warp_dev', 'QCOM') if COMMA_HARDWARE else 'CPU'
@@ -182,8 +241,6 @@ class ModelState(ModelStateBase):
       self.numpy_inputs['big_tfm'][:, :] = transforms[self._wide_key].reshape(3, 3)
 
     raw_outputs = self.adapter.run()
-    if self.chestnut and (err := Device[self.DEV].error_state.host.view(fmt='q')[0]):
-      raise RuntimeError(f"chestnut failed with {err}")
 
     if after_enqueue is not None:
       after_enqueue()
@@ -258,17 +315,18 @@ def main(demo=False):
 
   cloudlog.bind(daemon=PROCESS_NAME)
   setproctitle(PROCESS_NAME)
+  config_realtime_process(7, 54)
 
-  CHESTNUT = _find_driving_pkl(get_active_bundle(chestnut=True)) is not None and (chestnut_present() or cable_connected())
+  CHESTNUT = chestnut_present()
+  cloudlog.event("modeld eGPU decision", chestnut=CHESTNUT,
+                 bundle=getattr(get_active_bundle(chestnut=CHESTNUT), 'internalName', None),
+                 since_boot=round(time.monotonic(), 1))
   if CHESTNUT:
-    from tinygrad.runtime.ops_amd import AMDDevice
-    AMDDevice.wait_timeout_ms = 3000
+    os.environ['HCQDEV_WAIT_TIMEOUT_MS'] = '3000'
 
   params = Params()
   params.put_bool("ChestnutLoading", CHESTNUT)
   params.remove("ChestnutActive")
-
-  gc.disable()
 
   # visionipc clients
   while True:
@@ -298,27 +356,26 @@ def main(demo=False):
 
   model = None
   if CHESTNUT:
-    big_model = None
-    def load_big():
-      nonlocal big_model
-      try:
-        wait_for_chestnut()
-        m = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=True)
-        m.warmup()
-        big_model = m
-      except Exception:
-        cloudlog.exception("chestnut load failed")
-    loader = threading.Thread(target=load_big, daemon=True)
+    result: list = []
+
+    def make_big():
+      m = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=True)
+      m.warmup()
+      return m
+
+    def load():
+      result.append(_load_with_retry(make_big))
+
+    loader = threading.Thread(target=load, daemon=True)
     loader.start()
-    loader.join(BIG_MODEL_TIMEOUT)
-    model = big_model
-    if model is None and not params.get_bool("ChestnutRetry"):
-      # a crank can cut the chestnut power during the load, retry once with an onroad cycle
-      cloudlog.error("big model load failed, cycling onroad to retry")
-      params.put_bool("ChestnutRetry", True)
-      params.put_bool("OnroadCycleRequested", True)
-    else:
-      params.put_bool("ChestnutActive", model is not None)
+    loader.join(BIG_MODEL_TIMEOUT + (EGPU_LOAD_ATTEMPTS - 1) * EGPU_LOCK_RETRY_WAIT)
+    # read the result exactly once: the thread may still be running after a timeout, and a model
+    # that finishes loading late must not swap in mid-drive
+    model, load_err = result[0] if result else (None, None)
+    params.put_bool("ChestnutActive", model is not None)
+    if model is None:
+      why = repr(load_err) if load_err else f"no result after {BIG_MODEL_TIMEOUT}s"
+      cloudlog.error(f"eGPU model load failed or timed out ({why}); falling back to small model")
 
   small_model = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=False) if model is None or CHESTNUT else None
   if model is None:
@@ -327,13 +384,10 @@ def main(demo=False):
   assert model is not None
   cloudlog.warning(f"models loaded in {time.monotonic() - st:.1f}s, modeld starting")
 
-  config_realtime_process(7, 54)
-
   # messaging
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry", "modelDataV2SP"] + (["chestnutGpuState"] if CHESTNUT else [])
   pm = PubMaster(pub_socks)
-  sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState",
-                  "carControl", "controlsState", "lateralDelay"])
+  sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState", "carControl", "lateralDelay"])
 
   publish_state = PublishState()
   chestnut_state = ChestnutGpuState(pm, model.chestnut) if CHESTNUT else None
@@ -461,7 +515,7 @@ def main(demo=False):
                        run_count % round(model.constants.MODEL_FREQ / SERVICE_LIST['chestnutGpuState'].frequency) == 0)
       model_output = model.run(bufs, transforms, inputs, chestnut_state.send if send_chestnut else None)
     except Exception:
-      if not model.chestnut:
+      if not params.get_bool("ChestnutActive"):
         raise
       cloudlog.exception("big model failed, fall back to small")
       params.put_bool("ChestnutActive", False)
@@ -480,8 +534,6 @@ def main(demo=False):
       posenet_send = messaging.new_message('cameraOdometry')
       mdv2sp_send = messaging.new_message('modelDataV2SP')
 
-      if not sm['carControl'].latActive:
-        prev_action.desiredCurvature = sm['controlsState'].curvature
       action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
       prev_action = action
       fill_model_msg(drivingdata_send, modelv2_send, model_output, action,
