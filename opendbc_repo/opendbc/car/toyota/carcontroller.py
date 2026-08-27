@@ -36,9 +36,14 @@ MAX_STEER_RATE_FRAMES = 17  # tx control frames needed before torque can be cut
 # EPS allows user torque above threshold for 50 frames before permanently faulting
 MAX_USER_TORQUE = 500
 
+# Suppress at most two inactive keepalive CANCEL_REQ transmissions after the
+# cruise-active rising edge. At 100 Hz control and frame % 3 TX, this is <= 60 ms.
+SDSU_ENGAGE_CANCEL_SUPPRESS_TX = 2
+
 
 def get_long_tune(CP, params):
-  if CP.flags & ToyotaFlags.TSS2:
+  # LEXUS_GS_F (TSS-P) borrows the TSS2 path here (GS 450h port)
+  if CP.flags & ToyotaFlags.TSS2 or CP.carFingerprint == CAR.LEXUS_GS_F:
     kiBP = [2., 5.]
     kiV = [0.5, 0.25]
   else:
@@ -55,6 +60,10 @@ class CarController(CarControllerBase, GasInterceptorCarController):
     CarControllerBase.__init__(self, dbc_names, CP, CP_SP)
     GasInterceptorCarController.__init__(self, CP, CP_SP)
     self.params = CarControllerParams(self.CP)
+    # トルク帯で戻しレートを切り替える車種 (GS_F) 用。持たない車種では None = 常に固定値。
+    self.steer_delta_down_base = self.params.STEER_DELTA_DOWN
+    self.steer_delta_down_fast = getattr(self.params, 'STEER_DELTA_DOWN_FAST', None)
+    self.steer_delta_down_fast_below = getattr(self.params, 'STEER_DELTA_DOWN_FAST_BELOW', 0)
     self.last_torque = 0
     self.last_angle = 0
     self.alert_active = False
@@ -63,6 +72,17 @@ class CarController(CarControllerBase, GasInterceptorCarController):
     self.permit_braking = True
     self.steer_rate_counter = 0
     self.distance_button = 0
+
+    # GS custom sDSU v13.25-derived firmware uses checksum-valid ACC_CONTROL
+    # reception as the freshness source for its 0x283 generator. Scope this
+    # workaround to the verified GS port and alpha-long ownership mode.
+    self.sdsu_keepalive = (
+      self.CP.openpilotLongitudinalControl and
+      self.CP.carFingerprint == CAR.LEXUS_GS_F and
+      bool(self.CP_SP.flags & ToyotaFlagsSP.SMART_DSU)
+    )
+    self.sdsu_prev_cruise_enabled = False
+    self.sdsu_cancel_suppress_tx = 0
 
     # *** start long control state ***
     self.long_pid = get_long_tune(self.CP, self.params)
@@ -86,6 +106,17 @@ class CarController(CarControllerBase, GasInterceptorCarController):
     stopping = actuators.longControlState == LongCtrlState.stopping
     hud_control = CC.hudControl
     pcm_cancel_cmd = CC.cruiseControl.cancel
+
+    # controlsd can briefly request cancel between CRUISE_ACTIVE rising and
+    # CC.enabled propagation. Suppress only that edge case, never every cancel.
+    if self.sdsu_keepalive:
+      cruise_enabled = CS.out.cruiseState.enabled
+      if cruise_enabled and not self.sdsu_prev_cruise_enabled and not CC.enabled:
+        self.sdsu_cancel_suppress_tx = SDSU_ENGAGE_CANCEL_SUPPRESS_TX
+      elif CC.enabled:
+        self.sdsu_cancel_suppress_tx = 0
+      self.sdsu_prev_cruise_enabled = cruise_enabled
+
     lat_active = CC.latActive and abs(CS.out.steeringTorque) < MAX_USER_TORQUE
 
     if len(CC.orientationNED) == 3:
@@ -108,6 +139,13 @@ class CarController(CarControllerBase, GasInterceptorCarController):
           carlog.error("SecOC synchronization MAC mismatch, wrong key?")
 
     # *** steer torque ***
+    # GS: 戻し (unwind) レートはトルク帯で切り替える。高トルク帯では EPS が指令に追いつけず、
+    # 乖離が STEER_ERROR_MAX に達して steerFault になる (values.py の Stage 8 コメント参照)。
+    # 低トルク帯 = clip の 89.6% が集中する領域なので、そこだけ速く戻して体感を稼ぐ。
+    if self.steer_delta_down_fast is not None:
+      self.params.STEER_DELTA_DOWN = (self.steer_delta_down_fast
+                                      if abs(self.last_torque) < self.steer_delta_down_fast_below
+                                      else self.steer_delta_down_base)
     new_torque = int(round(actuators.torque * self.params.STEER_MAX))
     apply_torque = apply_meas_steer_torque_limits(new_torque, self.last_torque, CS.out.steeringTorqueEps, self.params)
 
@@ -265,12 +303,31 @@ class CarController(CarControllerBase, GasInterceptorCarController):
         elif net_acceleration_request_min > 0.3:
           self.permit_braking = False
 
-        pcm_accel_cmd = pcm_accel_cmd if self.CP.carFingerprint in TSS2_CAR else actuators.accel
+        if self.CP.carFingerprint in TSS2_CAR:
+          pass
+        elif self.CP.carFingerprint == CAR.LEXUS_GS_F:
+          # creep band (v<0.5): fade out PCM compensation to avoid limit cycle vs creep torque
+          _comp_frac = float(np.interp(CS.out.vEgo, [0.5, 1.0], [0.0, 1.0]))
+          pcm_accel_cmd = actuators.accel + (pcm_accel_cmd - actuators.accel) * _comp_frac
+        else:
+          pcm_accel_cmd = actuators.accel
         pcm_accel_cmd = float(np.clip(pcm_accel_cmd, self.params.ACCEL_MIN, self.params.ACCEL_MAX))
 
         main_accel_cmd = 0. if self.CP.flags & ToyotaFlags.SECOC.value else pcm_accel_cmd
-        can_sends.append(toyotacan.create_accel_command(self.packer, main_accel_cmd, pcm_cancel_cmd, self.permit_braking, self.standstill_req, lead,
+        if CC.longActive:
+          can_sends.append(toyotacan.create_accel_command(self.packer, main_accel_cmd, pcm_cancel_cmd, self.permit_braking, self.standstill_req, lead,
                                                         CS.acc_type, fcw_alert, self.distance_button))
+        elif self.sdsu_keepalive:
+          suppress_cancel = pcm_cancel_cmd and self.sdsu_cancel_suppress_tx > 0
+          cancel = pcm_cancel_cmd and not suppress_cancel
+          if self.sdsu_cancel_suppress_tx > 0:
+            self.sdsu_cancel_suppress_tx -= 1
+
+          # Neutral ACC_CONTROL heartbeat. This begins only after CarController
+          # initialization; the carstate 10 Hz timeout basis covers pre-init. Keep
+          # all non-acceleration fields aligned with the normal Toyota TX path.
+          can_sends.append(toyotacan.create_accel_command(self.packer, 0., cancel, self.permit_braking, self.standstill_req, lead,
+                                                          CS.acc_type, fcw_alert, self.distance_button))
         if self.CP.flags & ToyotaFlags.SECOC.value:
           acc_cmd_2 = toyotacan.create_accel_command_2(self.packer, pcm_accel_cmd)
           acc_cmd_2 = add_mac(self.secoc_key,
