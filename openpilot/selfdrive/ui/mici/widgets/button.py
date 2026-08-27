@@ -109,13 +109,16 @@ class BigButton(Widget):
 
   """A lightweight stand-in for the Qt BigButton, drawn & updated each frame."""
 
-  def __init__(self, text: str, value: str = "", icon: Union[rl.Texture, None] = None, scroll: bool = False):
+  def __init__(self, text: str, value: str = "", icon: Union[rl.Texture, None] = None, scroll: bool = False,
+               scroll_value: bool | None = None):
     super().__init__()
     self.set_rect(rl.Rectangle(0, 0, 402, 180))
     self.text = text
     self.value = value
     self._txt_icon = icon
     self._scroll = scroll
+    # value line scrolls independently of the title; None keeps the old coupled behavior
+    self._scroll_value = scroll if scroll_value is None else scroll_value
 
     self._scale_filter = BounceFilter(1.0, 0.1, 1 / gui_app.target_fps)
     self._click_delay = 0.075
@@ -128,7 +131,8 @@ class BigButton(Widget):
                                text_color=LABEL_COLOR, alignment_vertical=TextAlignmentVertical.BOTTOM, scroll=scroll,
                                line_height=0.9)
     self._sub_label = UnifiedLabel(value, font_size=COMPLICATION_SIZE, font_weight=FontWeight.ROMAN,
-                                   text_color=COMPLICATION_GREY, alignment_vertical=TextAlignmentVertical.BOTTOM)
+                                   text_color=COMPLICATION_GREY, alignment_vertical=TextAlignmentVertical.BOTTOM,
+                                   scroll=self._scroll_value)
     self._update_label_layout()
 
     self._load_images()
@@ -259,7 +263,7 @@ class BigButton(Widget):
   def _render(self, _):
     txt_bg, btn_x, btn_y, scale = self._handle_background()
 
-    if self._scroll:
+    if self._scroll or self._scroll_value:
       # draw black background since images are transparent
       scaled_rect = rl.Rectangle(btn_x, btn_y, self._rect.width * scale, self._rect.height * scale)
       rl.draw_rectangle_rounded(scaled_rect, 0.4, 7, rl.Color(0, 0, 0, int(255 * 0.5)))

@@ -69,6 +69,7 @@ static bool toyota_secoc = false;
 static bool toyota_alt_brake = false;
 static bool toyota_stock_longitudinal = false;
 static bool toyota_lta = false;
+static bool toyota_raised_steer_limits = false;  // LEXUS_GS_F Stage 1: raised torque steering limits (mirrors CarControllerParams)
 static int toyota_dbc_eps_torque_factor = 100;   // conversion factor for STEER_TORQUE_EPS in %: see dbc file
 
 static uint32_t toyota_compute_checksum(const CANPacket_t *msg) {
@@ -229,6 +230,29 @@ static bool toyota_tx_hook(const CANPacket_t *msg) {
     .has_steer_req_tolerance = true,
   };
 
+  // LEXUS_GS_F raised limits (Stage 5, 2026-07-17): ERROR_MAX 900 + DELTA_DOWN 40 (faster unwind for
+  // low-speed overshoot; EPS 1500 hard limit confirmed, max_torque stays upper bound). DELTA_UP <= 25.
+  //
+  // Stage 8 (2026-08-03): rate_down 40 -> 50 as an *upper bound only*. The car side now picks the
+  // unwind rate per torque band (opendbc/car/toyota/values.py: STEER_DELTA_DOWN 45, _FAST 50 below
+  // |torque| 500) because the real ceiling is EPS tracking, not the delta value: a 50 run showed
+  // 5728 clipped frames pass cleanly while the 3 faults all landed at |torque| 741/1416/1494 with
+  // the command-vs-measured gap hitting STEER_ERROR_MAX. panda must permit the widest value the
+  // car side can emit, so it carries 50 while the car side stays conservative where it matters.
+  // max_rt_delta: 100Hz x 250ms = 25 frames x 50 (rate_down) = 1250, +20% buffer = 1500
+  const TorqueSteeringLimits TOYOTA_GS_F_TORQUE_STEERING_LIMITS = {
+    .max_torque = 1800,
+    .max_rate_up = 25,
+    .max_rate_down = 50,
+    .max_torque_error = 900,
+    .max_rt_delta = 1500,
+    .type = TorqueMotorLimited,
+    .min_valid_request_frames = 17,
+    .max_invalid_request_frames = 1,
+    .min_valid_request_rt_interval = 162000,
+    .has_steer_req_tolerance = true,
+  };
+
   static const AngleSteeringLimits TOYOTA_ANGLE_STEERING_LIMITS = {
     // LTA angle limits
     // factor for STEER_TORQUE_SENSOR->STEER_ANGLE and STEERING_LTA->STEER_ANGLE_CMD (1 / 0.0573)
@@ -370,7 +394,8 @@ static bool toyota_tx_hook(const CANPacket_t *msg) {
       bool steer_req = GET_BIT(msg, 0U);
       // When using LTA (angle control), assert no actuation on LKA message
       if (!toyota_lta) {
-        if (steer_torque_cmd_checks(desired_torque, steer_req, TOYOTA_TORQUE_STEERING_LIMITS)) {
+        if (steer_torque_cmd_checks(desired_torque, steer_req,
+                                    toyota_raised_steer_limits ? TOYOTA_GS_F_TORQUE_STEERING_LIMITS : TOYOTA_TORQUE_STEERING_LIMITS)) {
           tx = false;
         }
       } else {
@@ -429,6 +454,7 @@ static safety_config toyota_init(uint16_t param) {
   const uint32_t TOYOTA_PARAM_ALT_BRAKE = 1UL << TOYOTA_PARAM_OFFSET;
   const uint32_t TOYOTA_PARAM_STOCK_LONGITUDINAL = 2UL << TOYOTA_PARAM_OFFSET;
   const uint32_t TOYOTA_PARAM_LTA = 4UL << TOYOTA_PARAM_OFFSET;
+  const uint32_t TOYOTA_PARAM_RAISED_STEER_LIMITS = 16UL << TOYOTA_PARAM_OFFSET;
 
   const uint16_t TOYOTA_PARAM_SP_UNSUPPORTED_DSU = 1;
   const uint16_t TOYTOA_PARAM_SP_GAS_INTERCEPTOR = 2;
@@ -441,6 +467,7 @@ static safety_config toyota_init(uint16_t param) {
   toyota_alt_brake = GET_FLAG(param, TOYOTA_PARAM_ALT_BRAKE);
   toyota_stock_longitudinal = GET_FLAG(param, TOYOTA_PARAM_STOCK_LONGITUDINAL);
   toyota_lta = GET_FLAG(param, TOYOTA_PARAM_LTA);
+  toyota_raised_steer_limits = GET_FLAG(param, TOYOTA_PARAM_RAISED_STEER_LIMITS);
   toyota_dbc_eps_torque_factor = param & TOYOTA_EPS_FACTOR;
 
   const bool toyota_unsupported_dsu = GET_FLAG(current_safety_param_sp, TOYOTA_PARAM_SP_UNSUPPORTED_DSU);
@@ -490,6 +517,8 @@ static safety_config toyota_init(uint16_t param) {
       TOYOTA_ALT_BRAKE_RX_CHECKS(false)
       TOYOTA_PCM_CRUISE_2_ADDR_CHECK
     };
+    // DSU_CRUISE (0x365) carries the ACC MAIN state on unsupported-DSU cars; without it
+    // whitelisted, acc_main_on never updates and MADS lateral can never engage.
     static RxCheck toyota_lka_unsupported_dsu_rx_checks[] = {
       TOYOTA_RX_CHECKS(false)
       TOYOTA_DSU_CRUISE_ADDR_CHECK

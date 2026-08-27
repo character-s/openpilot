@@ -193,14 +193,16 @@ class CheckUpdateButton(BigButton):
 
 class InstallUpdateButton(BigButton):
   def __init__(self):
-    super().__init__("install now", "", gui_app.texture("icons_mici/settings/device/reboot.png", 64, 70))
+    super().__init__("install now", "", gui_app.texture("icons_mici/settings/device/reboot.png", 64, 70), scroll_value=True)
     self.set_visible(lambda: ui_state.is_offroad() and ui_state.params.get_bool("UpdateAvailable"))
 
   def _update_state(self):
     super()._update_state()
 
     desc = _split_description(ui_state.params.get("UpdaterNewDescription") or "")
-    value = f"{desc[0]} ({desc[1]})" if desc is not None else ""
+    # hash first: it stays visible during the marquee start pause and is what
+    # distinguishes one update from the next (version/branch rarely change)
+    value = f"{desc[2]} - {desc[0]} ({desc[1]})" if desc is not None else ""  # ASCII separator: the UI font has no glyph for U+00B7
     if self.get_value() != value:
       self.set_value(value)
 
