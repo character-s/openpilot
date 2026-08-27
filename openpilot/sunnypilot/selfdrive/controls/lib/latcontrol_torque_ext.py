@@ -18,7 +18,10 @@ class LatControlTorqueExt(NeuralNetworkLateralControl, LatControlTorqueExtOverri
              desired_lateral_accel, actual_lateral_accel, lateral_accel_deadzone, gravity_adjusted_lateral_accel,
              desired_curvature, actual_curvature, steer_limited_by_safety, output_torque):
     self._ff = ff
-    self._pid = pid
+    # ★ NNL-8: base の PID を共有しない (旧: `self._pid = pid`)。共有していたため
+    # (a) lat accel 空間用の低速ブースト KP_INTERP が torque 空間 error に掛かり
+    # (b) 1 frame で PID が二重 update され (c) windup guard が別単位の limit で
+    # 判定していた。3 つとも同じ 1 行が原因。専用 PID は ext_base.__init__ で生成する。
     self._pid_log = pid_log
     self._setpoint = setpoint
     self._measurement = measurement

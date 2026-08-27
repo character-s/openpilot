@@ -49,6 +49,37 @@ class CarControllerParams:
       self.STEER_DELTA_UP = 10       # 1.5s time to peak torque
       self.STEER_DELTA_DOWN = 25     # always lower than 45 otherwise the Rav4 faults (Prius seems ok with 50)
 
+    # Stage 1 (B): LEXUS_GS_F raised limits, mirrored in panda safety via RAISED_STEER_LIMITS
+    if CP.carFingerprint == CAR.LEXUS_GS_F and CP.lateralTuning.which() == 'torque':
+      self.STEER_MAX = 1500
+      self.STEER_ERROR_MAX = 900  # Stage 4 (07-16): 750->900, panda mirror b9749d40
+      # Stage 9 (08-15): 15->20。07-13 に 20->15 したのは limit cycle の切り分けのためだったが、
+      # 当時の振動の主因は **friction 0.11 の過剰リレー**と 07-14 に確定済み (0.08 復帰で
+      # 「v2+0.08 が全指標で過去最良」)。DELTA_UP は「1.8Hz 振幅を通した共犯」評価だった。
+      # 08-15 に当時 (a4/af) と現在 (33/34) の op_cmd を同じ物差しで測り直した結果:
+      #   - 制御器の要求が別物になっている: ±MAX(>1400) 連発率 44.2%(07-12) -> 9.4%(08-14)、
+      #     op_cmd の 1.5-3.2Hz 帯パワーは 60-100km/h で 3.96e-01 -> 1.25e-02 (32 倍改善)
+      #   - a4 は DELTA_UP=20 実走データと同定でき (総当たりで 20 が最一致)、その実測 lcBP
+      #     7.62e-03(30-60km/h) は現行 15 の 8.90e-03 より **低い** = 20 は過去に許容された水準
+      #   - a4 内で 15->20 の lcBP 変化は 1.2 倍だけ = 当時のぷるぷるは DELTA_UP では説明できない
+      # 狙い = 低速急カーブの立ち上がり短縮 (0->1500 が 1.00s -> 0.75s)。1500 張り付きも
+      # fulfill 不足 (82-87%) も低速に集中しているため ([[project_gs_steer_headroom]])。
+      # 開ループ sim の予測 = lcBP 1.5 倍 (⚠ 閉ループ増幅は含まない下限値)。
+      # panda 側は max_rate_up=25 なので **mirror 不要** (20 < 25、rt_delta も 500 < 1500)。
+      self.STEER_DELTA_UP = 20
+      # Stage 8 (08-03): 戻しレートの上限は「delta の値」ではなく **EPS の追従能力** で決まる。
+      # DELTA_DOWN=50 の実走 (95k frames) を _steer_rate_hit.py --fault-trace で解析した結果:
+      #   - |delta|=50 は fault なしで 5728 frames / 最大 30 連続 通っている = 単発値では決まらない
+      #   - 250ms 累積も clean 1250 > fault 時 375 で説明不能 = rt_delta でもない
+      #   - fault 3 件はいずれも「指令 vs EPS 実測の乖離が STEER_ERROR_MAX(900) に到達」した瞬間で、
+      #     max|torque| = 741 / 1416 / 1494 と **すべて高トルク帯**
+      #   - 一方 clip の 89.6% は |torque|<500 に集中 (40 走行でも 82%)
+      # → トルク帯で分ける。低トルク側は恩恵の 9 割を取り、高トルク側は fault 実績のある 45 に戻す。
+      # 40 (191k) / 45 (126k) の走行では走行中 fault ゼロなので 45 は実証済みの安全値。
+      self.STEER_DELTA_DOWN = 45
+      self.STEER_DELTA_DOWN_FAST = 50          # |torque| < FAST_BELOW でのみ使う
+      self.STEER_DELTA_DOWN_FAST_BELOW = 500   # fault 最小事例 741 の下に余裕を取った閾値
+
 
 class ToyotaSafetyFlags(IntFlag):
   # first byte is for EPS scaling factor
@@ -56,6 +87,7 @@ class ToyotaSafetyFlags(IntFlag):
   STOCK_LONGITUDINAL = (2 << 8)
   LTA = (4 << 8)
   SECOC = (8 << 8)
+  RAISED_STEER_LIMITS = (16 << 8)
 
 
 class ToyotaFlags(IntFlag):

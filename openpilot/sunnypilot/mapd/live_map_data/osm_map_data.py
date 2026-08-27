@@ -7,6 +7,7 @@ See the LICENSE.md file in the root directory for more details.
 import json
 import math
 import platform
+import time
 
 from openpilot.cereal import log
 from openpilot.common.params import Params
@@ -33,6 +34,11 @@ class OsmMapData(BaseMapData):
     params = {
       "latitude": self.last_position.latitude,
       "longitude": self.last_position.longitude,
+      # PLN-1_3 (2026-08-08): we keep rewriting the last known fix while the localizer is invalid, so
+      # consumers (mapd, SmartCruiseControlMap) had no way to tell a fresh fix from a 36 s cold
+      # start pointing at the middle of the Pacific. Stamp both so they can refuse to use it.
+      "valid": bool(self.localizer_valid),
+      "unixMillis": int(time.time() * 1e3),
     }
 
     if self.last_bearing is not None:

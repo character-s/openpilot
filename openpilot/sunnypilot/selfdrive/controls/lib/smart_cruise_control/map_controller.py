@@ -1,14 +1,15 @@
 import json
 import math
 import platform
+import time
 
 from openpilot.cereal import custom
+from openpilot.common.constants import CV
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
 from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
-from openpilot.sunnypilot.navd.helpers import coordinate_from_param, Coordinate
-from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control import MIN_V
+from openpilot.sunnypilot.navd.helpers import Coordinate
 
 MapState = VisionState = custom.LongitudinalPlanSP.SmartCruiseControl.MapState
 
@@ -26,6 +27,50 @@ TARGET_OFFSET = 1.0  # seconds - This controls how soon before the curve you rea
                      # done to keep the distance calculations consistent but results in the offset actually being less
                      # time than specified depending on how much of a speed differential there is between v_ego and the
                      # target velocity.
+
+# GS450h PLN-1_3 hygiene patch (2026-08-08, see the "20 km/h disease" analysis):
+# mapd hands us targets computed from hand-drawn OSM node jitter, and it does so even while the
+# localizer has no fix at all - 58 % of route 39's turning samples were produced while
+# LastGPSPosition was still (0, 0) or 5 km off after a cold start. Two guards below:
+#   * GPS_STALE_S: drop every target unless the fix behind it is fresh and flagged valid.
+#   * V_TARGET_REJECT: a sub-15 km/h "curve" on a Japanese city street is node noise, not a curve.
+#     Rejecting it is honest; the old max(v_target, MIN_V) clip merely repainted every bogus
+#     target as a plausible-looking 20.0 km/h, which is what hid the bug for so long.
+GPS_STALE_S = 2.0
+V_TARGET_REJECT = 15 * CV.KPH_TO_MS
+
+
+def position_from_param(param: str, params: Params) -> tuple[Coordinate | None, bool]:
+  """Read LastGPSPosition and report whether it can be trusted.
+
+  osm_map_data keeps rewriting the last known fix while the localizer is invalid, so a plain
+  coordinate read cannot tell a fresh fix from a 36 s cold start. It now also stores "valid" and
+  "unixMillis"; a payload without them is treated as untrusted rather than assumed good.
+  """
+  raw = params.get(param)
+  if not raw:
+    return None, False
+
+  try:
+    data = json.loads(raw)
+  except (ValueError, TypeError):
+    return None, False
+
+  lat, lon = data.get("latitude"), data.get("longitude")
+  if lat is None or lon is None:
+    return None, False
+
+  pos = Coordinate(float(lat), float(lon))
+  if abs(pos.latitude) < 1e-6 and abs(pos.longitude) < 1e-6:  # (0, 0) = never fixed
+    return None, False
+  if not data.get("valid", False):
+    return pos, False
+
+  ts = data.get("unixMillis")
+  if ts is None or (time.time() * 1e3 - float(ts)) > GPS_STALE_S * 1e3:
+    return pos, False
+
+  return pos, True
 
 
 def velocities_from_param(param: str, params: Params):
@@ -84,12 +129,14 @@ class SmartCruiseControlMap:
     self.target_lon = 0.0
     self.frame = -1
 
-    self.last_position = coordinate_from_param("LastGPSPosition", self.mem_params) or Coordinate(0.0, 0.0)
+    self.last_position = position_from_param("LastGPSPosition", self.mem_params)[0] or Coordinate(0.0, 0.0)
     self.target_velocities = velocities_from_param("MapTargetVelocities", self.mem_params) or []
 
   def get_v_target_from_control(self) -> float:
+    # No MIN_V clip here on purpose: targets below V_TARGET_REJECT are dropped in
+    # update_calculations, so anything that reaches this point is a target we actually believe.
     if self.is_active:
-      return max(self.v_target, MIN_V)
+      return self.v_target
 
     return V_CRUISE_UNSET
 
@@ -100,14 +147,28 @@ class SmartCruiseControlMap:
     if self.frame % int(PARAMS_UPDATE_PERIOD / DT_MDL) == 0:
       self.enabled = self.params.get_bool("SmartCruiseControlMap")
 
+  def reset_target(self) -> None:
+    self.target_velocities = []
+    self.v_target = 0.0
+    self.target_lat = 0.0
+    self.target_lon = 0.0
+
   def update_calculations(self) -> None:
-    self.last_position = coordinate_from_param("LastGPSPosition", self.mem_params) or Coordinate(0.0, 0.0)
+    position, gps_ok = position_from_param("LastGPSPosition", self.mem_params)
+    self.last_position = position or Coordinate(0.0, 0.0)
+
+    if not gps_ok:
+      # Stale, missing or never-fixed position: whatever mapd matched, it matched it somewhere
+      # else. Silence map control entirely instead of steering off a guess.
+      self.reset_target()
+      return
+
     lat = self.last_position.latitude
     lon = self.last_position.longitude
 
     self.target_velocities = velocities_from_param("MapTargetVelocities", self.mem_params) or []
 
-    if self.last_position is None or self.target_velocities is None:
+    if self.target_velocities is None:
       return
 
     min_dist = 1000
@@ -151,6 +212,9 @@ class SmartCruiseControlMap:
         a = 0.5 * TARGET_JERK
         b = self.a_ego
         c = self.v_ego - tv
+        # 2026-08-08: was "/ 2 * a", i.e. (...) / 2 * a instead of (...) / (2 * a). With
+        # a = 0.5 * TARGET_JERK = -0.3 that is a factor 11 too small, so max_d came out far too
+        # short and the controller decided "no need to slow down yet" until it was too late.
         t_a = -1 * ((b**2 - 4 * a * c) ** 0.5 + b) / (2 * a)
         t_b = ((b**2 - 4 * a * c) ** 0.5 - b) / (2 * a)
         if not isinstance(t_a, complex) and t_a > 0:
@@ -181,6 +245,13 @@ class SmartCruiseControlMap:
         min_v = tv
         target_lat = lat
         target_lon = lon
+
+    # Reject instead of clip: a target this low on a road we are driving at 40-60 km/h is mapd
+    # reading hand-drawn OSM node jitter as curvature, not a curve that exists.
+    if 0.0 < min_v < V_TARGET_REJECT:
+      min_v = 100.0
+      target_lat = 0.0
+      target_lon = 0.0
 
     if self.v_target < min_v and not (self.target_lat == 0 and self.target_lon == 0):
       for i in range(len(forward_points)):
