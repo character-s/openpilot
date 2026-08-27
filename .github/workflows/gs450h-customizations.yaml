@@ -1,0 +1,63 @@
+# upstream 追従で GS 450h 改造が黙って落ちていないかを検出する。
+#
+# ⚠ 本家 staging-chestnut は orphan force-push なので、追従は毎回
+#   「新ベースを checkout して GS 改造を cherry-pick で載せ直す」になる。
+#   そのとき (1) 改造が載り漏れる (2) 上流が API を消す (3) 捨てた関数への参照が残る
+#   の 3 種類の事故が起きる。人力の突き合わせをこれで機械化してある。
+#
+# ⚠ このテストは **openpilot の依存を一切必要としない** (ast でソースを読むだけ)。
+#   なので scons も submodule も要らず、素の python + pytest だけで 1 分以内に終わる。
+#   ⇒ 本家の重い CI とは独立に回せる。重くしないこと。
+#
+# ⚠⚠ `.github/` は upstream の staging-chestnut に無いので、**追従のたびに載せ直しが要る**。
+#   cherry-pick の対象から漏らさないこと。
+
+name: GS 450h customizations
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: gs450h-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  customizations:
+    name: 改造が落ちていないか
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false   # ソースを読むだけなので不要
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install --disable-pip-version-check pytest
+
+      # ⚠ 追従ブランチ名は毎回変わる (gs450h-follow-YYYYMMDD) ので branches は '**' にしてある。
+      #   その代わり、テストがまだ載っていない古いブランチ (egpu-load-resilience 等) に push した
+      #   ときに赤くならないよう、ここで存在を見てスキップする。
+      - name: テストが載っているブランチか
+        id: guard
+        run: |
+          if [ -f openpilot/sunnypilot/tests/test_gs450h_customizations.py ]; then
+            echo 'found=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'found=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::GS 450h のテストが無いブランチなのでスキップ'
+          fi
+
+      # ⚠ --noconftest は必須。openpilot の conftest.py は cereal など重い依存を import するので、
+      #   付けないと collection の時点で落ちる。
+      - name: pytest
+        if: steps.guard.outputs.found == 'true'
+        run: |
+          python -m pytest openpilot/sunnypilot/tests/test_gs450h_customizations.py \
+            -q --noconftest --no-header
