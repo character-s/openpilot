@@ -49,7 +49,68 @@ from openpilot.sunnypilot.models.helpers import get_active_bundle
 from openpilot.sunnypilot.selfdrive.controls.lib.relc import RoadEdgeLaneChangeController
 
 PROCESS_NAME = "openpilot.selfdrive.modeld.modeld_tinygrad"
-BIG_MODEL_TIMEOUT = 60
+BIG_MODEL_TIMEOUT = 150  # GS450h: measured 80.3s cold load on chestnut (2026-08-24); 60s always timed out
+
+# Cap on the bundle's "long" override, which is a first-order lag applied to the model's
+# desiredAcceleration *after* it is produced (see smooth_value in drive_helpers.py).
+# TT ships long=".3". With DT_MDL=0.05 that is alpha = 1-exp(-0.05/0.3) = 0.154, so a step to
+# 1.0 m/s^2 only reaches 0.15 in the first frame and 0.63 after 0.3s. GS 450h's
+# longitudinalActuatorDelay is 0.05s, so this filter - not the actuator and not the model -
+# dominates the onset. That is the "soft pedal every time" the driver reported (2026-08-25).
+# ⚠ This is a cap, not a fixed value: a bundle asking for less keeps its own number.
+# ⚠ modeld also feeds LONG_SMOOTH_SECONDS into long_delay, so the planner's delay
+#   compensation follows this automatically - do not compensate for it a second time.
+# 0.15 per the driver's call (2026-08-25, ".15 or .2 is fine"): step response reaches 49%
+# in 0.1s / 74% in 0.2s, vs 28%/49% at the shipped 0.3 - most of the win with less risk
+# of surging on plan noise than 0.1 would carry.
+LONG_SMOOTH_SECONDS_MAX = 0.15
+
+# tinygrad's AMD-over-USB backend guards the device with a flock on /tmp/am_usb:<bus>-<port>.lock
+# and takes it with LOCK_EX | LOCK_NB (system.py:144-148) - whoever asks second fails instantly
+# with "Failed to acquire lock file", which surfaces as "No interface for AMD:0 is available".
+# Measured 2026-08-25: two boots that decided at since_boot 34.0/34.6s loaded fine, the one that
+# decided at 35.3s lost the lock. Losing that race cost an entire drive's worth of driving model.
+# Nothing else in openpilot takes this lock (chestnut_present() and usb.py both read sysfs only),
+# so the contender is another modeld instance that has not exited yet - retrying is the fix.
+EGPU_LOAD_ATTEMPTS = 5  # total attempts, not retries
+EGPU_LOCK_RETRY_WAIT = 3.0  # [s] between attempts, well inside BIG_MODEL_TIMEOUT
+
+
+def _is_lock_contention(e: BaseException) -> bool:
+  # the real error is nested inside an ExceptionGroup, so match on the rendered text
+  return "Failed to acquire lock file" in repr(e)
+
+
+def _egpu_lock_holder() -> str:
+  """Who is holding the am_usb lock. Diagnosis only - never raises."""
+  import glob
+  import subprocess
+  try:
+    locks = glob.glob("/tmp/am_usb:*.lock")
+    if not locks:
+      return "no lock file"
+    out = subprocess.run(["fuser", "-v"] + locks, capture_output=True, text=True, timeout=5)
+    return " ".join((out.stdout + out.stderr).split())[:300] or "nobody"
+  except Exception:
+    return "unknown"
+
+
+def _load_with_retry(make_model, attempts: int = EGPU_LOAD_ATTEMPTS, wait: float = EGPU_LOCK_RETRY_WAIT):
+  """Call make_model up to `attempts` times, retrying only on am_usb lock contention.
+
+  Returns (model, error); model is None when every attempt failed."""
+  last: Exception | None = None
+  for attempt in range(1, attempts + 1):
+    try:
+      return make_model(), None
+    except Exception as e:  # an unhandled exception in the load thread would die silently
+      last = e
+      if not _is_lock_contention(e) or attempt == attempts:
+        break
+      cloudlog.warning(f"eGPU lock held (attempt {attempt}/{attempts}), retry in {wait}s (holder: {_egpu_lock_holder()})")
+      time.sleep(wait)
+  cloudlog.error(f"eGPU model load failed (lock holder: {_egpu_lock_holder()})")
+  return None, last
 
 
 def _pkl_exists(path):
@@ -98,7 +159,7 @@ class ModelState(ModelStateBase):
     overrides = {override.key: override.value for override in model_bundle.overrides} if model_bundle else {}
 
     self.LAT_SMOOTH_SECONDS = float(overrides.get('lat', ".0"))
-    self.LONG_SMOOTH_SECONDS = float(overrides.get('long', ".0"))
+    self.LONG_SMOOTH_SECONDS = min(float(overrides.get('long', ".0")), LONG_SMOOTH_SECONDS_MAX)
     self.MIN_LAT_CONTROL_SPEED = 0.3
     self.PLANPLUS_CONTROL: float = 1.0
     self.chestnut = chestnut
@@ -312,6 +373,9 @@ def main(demo=False):
   config_realtime_process(7, 54)
 
   CHESTNUT = chestnut_present()
+  cloudlog.event("modeld eGPU decision", chestnut=CHESTNUT,
+                 bundle=getattr(get_active_bundle(chestnut=CHESTNUT), 'internalName', None),
+                 since_boot=round(time.monotonic(), 1))
   if CHESTNUT:
     os.environ['HCQDEV_WAIT_TIMEOUT_MS'] = '3000'
 
@@ -347,20 +411,26 @@ def main(demo=False):
 
   model = None
   if CHESTNUT:
-    big_model = None
-    def load_big():
-      nonlocal big_model
-      try:
-        m = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=True)
-        m.warmup()
-        big_model = m
-      except Exception:
-        cloudlog.exception("chestnut load failed")
-    loader = threading.Thread(target=load_big, daemon=True)
+    result: list = []
+
+    def make_big():
+      m = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=True)
+      m.warmup()
+      return m
+
+    def load():
+      result.append(_load_with_retry(make_big))
+
+    loader = threading.Thread(target=load, daemon=True)
     loader.start()
-    loader.join(BIG_MODEL_TIMEOUT)
-    model = big_model
+    loader.join(BIG_MODEL_TIMEOUT + (EGPU_LOAD_ATTEMPTS - 1) * EGPU_LOCK_RETRY_WAIT)
+    # read the result exactly once: the thread may still be running after a timeout, and a model
+    # that finishes loading late must not swap in mid-drive
+    model, load_err = result[0] if result else (None, None)
     params.put_bool("ChestnutActive", model is not None)
+    if model is None:
+      why = repr(load_err) if load_err else f"no result after {BIG_MODEL_TIMEOUT}s"
+      cloudlog.error(f"eGPU model load failed or timed out ({why}); falling back to small model")
 
   small_model = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=False) if model is None or CHESTNUT else None
   if model is None:
