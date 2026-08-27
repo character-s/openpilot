@@ -22,6 +22,37 @@ from openpilot.sunnypilot.selfdrive.controls.lib.nnlc.model import NNTorqueModel
 LOW_SPEED_X = [0, 10, 20, 30]
 LOW_SPEED_Y = [12, 3, 1, 0]
 
+# GS 450h: 持続カーブでプラントゲインが上がり fulfill が入り 93% -> 3-5s 後 105% まで育つ
+# (トルクは減っているのに曲がり続ける)。定常だけ FF を絞ってこの上振れを打ち消す。
+# JSON 側で一様に 5% 絞る v6shrink は狙いどおり定常を 99.8% にしたが、入りまで 93.4->88.8% と
+# 削って user 体感の切り込み不足を招いたため、時間依存のこちらへ移行 (2026-07-28)。
+# 併用禁止: この trim を入れるときは model を v5f に戻すこと (v6shrink と二重に効く)。
+SETTLED_LA_MIN = 0.5           # これ未満は「カーブ中」と見なさない
+SETTLED_RAMP_X = [1.0, 2.5]    # 同符号カーブの継続時間 [s]
+SETTLED_RAMP_Y = [0.0, 1.0]    # 補正の効き (0 = 無補正)
+
+# ★ 07-28: 固定 5% から (v, |la|) テーブルへ。rlog 20 route / 1184 episode 窓の実測
+# 残差面 (`archive/probes/_calib_residual_surface.py`) で、定常 fulfill が
+#   29-61km/h: 107.2 / 107.1 / 103.7 / 96.7%   (|la| .5-.7 / .7-1.0 / 1.0-1.5 / 1.5+)
+#   >61km/h  : 106.6 / 105.1 / 105.8 / 103.0%
+#   18-29km/h: (薄) / -- / -- / 89.1%
+# と **小 la で過剰・大 la で不足**と判明したため。固定 5% 減は大 la 帯 (交差点の切り込み)
+# を悪化させていた (18-29 × la1.5+ は元々 11% 不足なのに更に 5% 削っていた)。
+# 正 = FF を減らす / 負 = FF を増やす。trim = 1 - 1/fulfill。
+# ★ 07-28 夜: ±3% 制限を実測値へ開いた (キャップ ±8%)。初回 ±3% 版で 1 走行 (f4-f6、52min)
+# 判定した結果 — 低速 overshoot 156.7 -> 90.2 ep/h・29-61 帯 93.0 -> 35.5 ep/h と改善、
+# 狭帯カーブ clear p05 は最良級 (f6 1.19m)、user 体感は「プラシーボ程度」= 副作用なし。
+# 3% では体感にも残差面にも足りないので、採用セル (LOO 符号一致 + bootstrap 90%CI) の
+# 実測値をそのまま入れる。18-29 × la1.5+ のみ実測 -12.2% を -8% にキャップ。
+# n 不足セル (18-29 の .5-.7 / .7-1.0 / 1.0-1.5) は 29-61 行より控えめな外挿のまま。
+SETTLED_TRIM_LA = [0.6, 0.85, 1.25, 2.0]      # |desired la| の代表点
+SETTLED_TRIM_V = [7.0, 12.0, 20.0]            # vEgo [m/s] の代表点 (25 / 43 / 72 km/h)
+SETTLED_TRIM_TBL = [
+    [0.050, 0.050, 0.000, -0.080],            # 18-29km/h  (la1.5+ 実測 -0.122 を -0.08 へキャップ)
+    [0.067, 0.066, 0.036, -0.034],            # 29-61km/h  (107.2 / 107.1 / 103.7 / 96.7%)
+    [0.062, 0.049, 0.055,  0.029],            # >61km/h    (106.6 / 105.1 / 105.8 / 103.0%)
+]
+
 
 # At a given roll, if pitch magnitude increases, the
 # gravitational acceleration component starts pointing
@@ -61,9 +92,22 @@ class NeuralNetworkLateralControl(LatControlTorqueJerkAware):
     self.error_deque = deque(maxlen=history_check_frames[0])
     self.past_future_len = len(self.past_times) + len(self.nn_future_times)
 
+    # settled FF trim の状態 (同符号カーブの継続時間と符号)
+    self._settled_time = 0.0
+    self._settled_sign = 0.0
+
   @property
   def _nnlc_enabled(self):
     return self.enabled and self.model_valid and self.has_nn_model
+
+  @property
+  def output_pid(self):
+    """★ NNL-8: 出力を実際に作った PID (NNLC 無効時は None = base 側)。rlog の p/i/d/f 用。
+
+    NNL-8 で PID を base と分けたので、latcontrol_torque.py が自分の self.pid を
+    そのまま logging すると出力を作っていない側の内訳が rlog に出てしまう。
+    """
+    return self._pid if self._nnlc_enabled else None
 
   def update_limits(self):
     super().update_limits()
@@ -86,6 +130,14 @@ class NeuralNetworkLateralControl(LatControlTorqueJerkAware):
                                                                                CS.vEgo, CS.aEgo), self.torque_params, gravity_adjusted=True)
     self._ff += get_friction_in_torque_space(self._desired_lateral_accel - self._actual_lateral_accel, self._lateral_accel_deadzone,
                                              FRICTION_THRESHOLD, self.torque_params)
+
+  def update_output_torque(self, CS):
+    self.update_limits()  # Stage 1 (A): set PID limits right before PID.update
+    freeze_integrator = self._steer_limited_by_safety or CS.steeringPressed or CS.vEgo < 5
+    self._output_torque = self._pid.update(self._pid_log.error,
+                                           feedforward=self._ff,
+                                           speed=CS.vEgo,
+                                           freeze_integrator=freeze_integrator)
 
   def update_neural_network_feedforward(self, CS, params, calibrated_pose) -> None:
     if not self._nnlc_enabled:
@@ -152,6 +204,19 @@ class NeuralNetworkLateralControl(LatControlTorqueJerkAware):
                + past_lateral_accels_desired + future_planned_lateral_accels \
                + past_rolls + future_rolls
     self._ff = self.model.evaluate(nn_input)
+
+    # settled (定常) 区間だけ FF を絞る。入り (turn-in) は無補正なので切り込みは落ちない。
+    la = self._desired_lateral_accel
+    if abs(la) > SETTLED_LA_MIN and (self._settled_sign == 0.0 or sign(la) == self._settled_sign):
+      self._settled_sign = sign(la)
+      self._settled_time += 0.01
+    else:
+      self._settled_time = 0.0
+      self._settled_sign = 0.0
+    # (v, |la|) の 2 段線形補間。格子点の間は連続に変化する。
+    trim_rows = [float(np.interp(abs(la), SETTLED_TRIM_LA, row)) for row in SETTLED_TRIM_TBL]
+    trim = float(np.interp(CS.vEgo, SETTLED_TRIM_V, trim_rows))
+    self._ff *= 1.0 - trim * float(np.interp(self._settled_time, SETTLED_RAMP_X, SETTLED_RAMP_Y))
 
     # apply friction override for cars with low NN friction response
     if self.model.friction_override:

@@ -4,10 +4,12 @@ from openpilot.cereal import log
 
 from openpilot.system.ui.widgets.scroller import NavScroller
 from openpilot.selfdrive.ui.mici.widgets.button import BigParamControl, BigMultiParamToggle, BigToggle, GreyBigButton
+from openpilot.selfdrive.ui.mici.widgets.lane_centering import LaneCenteringChoice, LaneCenteringToggle
 from openpilot.selfdrive.ui.mici.widgets.dialog import BigConfirmationCircleButton
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.layouts.settings.common import restart_needed_callback
 from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.sunnypilot.selfdrive.controls.lib import lane_centering_params as lcp
 
 PERSONALITY_TO_INT = log.LongitudinalPersonality.schema.enumerants
 
@@ -44,6 +46,25 @@ class TogglesLayoutMici(NavScroller):
     self._personality_toggle = BigMultiParamToggle("driving personality", "LongitudinalPersonality", ["aggressive", "standard", "relaxed"])
     self._experimental_btn = BigToggle("experimental mode", initial_state=ui_state.params.get_bool("ExperimentalMode"),
                                        toggle_callback=self._on_experimental_mode)
+    # DEC は experimental mode の中で「ACC と e2e のどちらを使うか」をモデルに選ばせる設定。
+    # 旧 UI (sunnypilot/layouts/settings/cruise.py) にしかなく、c4 では sunnylink を開く以外に
+    # 切り替える手段が無かった。実走 A/B (FULL e2e = DEC OFF) で頻繁に触るのでここに出す。
+    self._dec_toggle = BigParamControl("dynamic experimental control", "DynamicExperimentalControl")
+    # Lane Centering (StarPilot 由来の幾何補正、08-26 移植)。⚠ この 4 つは openpilot の Params
+    # ではなく `/data/params_fork/d` に保存している — params に置くと `clearAll` のホワイトリスト
+    # から外れて manager 起動のたびに消えるため。読み書きは lane_centering_params が持つ。
+    # ⚠ 横制御なので DEC/exp の縦制御ゲートには連動させない。
+    self._lane_centering_toggle = LaneCenteringToggle("lane centering", lcp.KEY_ENABLED)
+    # 詳細 3 つは親が ON のときだけ出す。⚠ callable を渡すのは、親を押した瞬間に出したいため
+    # (_update_toggles は show_event と engaged 遷移でしか回らない)。
+    self._lane_center_offset = LaneCenteringChoice("center offset", lcp.KEY_OFFSET,
+                                                   lcp.OFFSET_CHOICES, lcp.offset_label)
+    self._lane_center_authority = LaneCenteringChoice("yield to model", lcp.KEY_AUTHORITY,
+                                                      lcp.AUTHORITY_CHOICES, lcp.authority_label)
+    self._lane_center_pause = LaneCenteringToggle("pause on signal", lcp.KEY_PAUSE_ON_SIGNAL)
+    self._lane_centering_details = (self._lane_center_offset, self._lane_center_authority, self._lane_center_pause)
+    for item in self._lane_centering_details:
+      item.set_visible(lambda: self._lane_centering_toggle._checked)
     is_metric_toggle = BigParamControl("use metric units", "IsMetric")
     ldw_toggle = BigParamControl("lane departure warnings", "IsLdwEnabled")
     always_on_dm_toggle = BigParamControl("always-on driver monitor", "AlwaysOnDM")
@@ -54,6 +75,9 @@ class TogglesLayoutMici(NavScroller):
     self._scroller.add_widgets([
       self._personality_toggle,
       self._experimental_btn,
+      self._dec_toggle,
+      self._lane_centering_toggle,
+      *self._lane_centering_details,
       is_metric_toggle,
       ldw_toggle,
       always_on_dm_toggle,
@@ -65,6 +89,7 @@ class TogglesLayoutMici(NavScroller):
     # Toggle lists
     self._refresh_toggles = (
       ("ExperimentalMode", self._experimental_btn),
+      ("DynamicExperimentalControl", self._dec_toggle),
       ("IsMetric", is_metric_toggle),
       ("IsLdwEnabled", ldw_toggle),
       ("AlwaysOnDM", always_on_dm_toggle),
@@ -73,6 +98,12 @@ class TogglesLayoutMici(NavScroller):
       ("OpenpilotEnabledToggle", enable_openpilot),
     )
 
+    # DEC は exp モードの中で「ACC と e2e のどちらを使うか」をモデルに選ばせる設定なので、exp OFF では
+    # planner が判定ごと捨てる (longitudinal_planner.py の `experimental_mode and dec.mode() == "blended"`)。
+    # 押せてしまうと「ON にしたのに何も起きない」状態を作れてしまうので、exp に連動して灰色にする。
+    # 参照先を param ではなく exp トグルの表示状態にしているのは、毎フレーム param を読まずに済み、かつ
+    # 確認ダイアログが未確定の間は False のまま = 画面の見た目と必ず一致するため。
+    self._dec_toggle.set_enabled(lambda: self._experimental_btn._checked)
     enable_openpilot.set_enabled(lambda: not ui_state.engaged)
     record_front.set_enabled(False if ui_state.params.get_bool("RecordFrontLock") else (lambda: not ui_state.engaged))
     record_mic.set_enabled(lambda: not ui_state.engaged)
@@ -104,16 +135,25 @@ class TogglesLayoutMici(NavScroller):
       if ui_state.has_longitudinal_control:
         self._experimental_btn.set_visible(True)
         self._personality_toggle.set_visible(True)
+        # DEC は experimental mode の中の選択なので、exp と同じ縦制御ゲートに従わせる
+        self._dec_toggle.set_visible(True)
       else:
         # no long for now
         self._experimental_btn.set_visible(False)
         self._experimental_btn.set_checked(False)
         self._personality_toggle.set_visible(False)
+        self._dec_toggle.set_visible(False)
         ui_state.params.remove("ExperimentalMode")
 
     # Refresh toggles from params to mirror external changes
     for key, item in self._refresh_toggles:
       item.set_checked(ui_state.params.get_bool(key))
+
+    # Lane Centering は Params ではなく `/data/params_fork/d` に保存しているので自前で取り込む。
+    # SSH で直接書かれた場合もここで画面に反映される。
+    self._lane_centering_toggle.refresh()
+    for item in self._lane_centering_details:
+      item.refresh()
 
   def _on_experimental_mode(self, state: bool):
     if state and not ui_state.params.get_bool("ExperimentalModeConfirmed"):

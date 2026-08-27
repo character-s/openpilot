@@ -23,7 +23,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_ext import La
 # to be overcome to move it at all, this is compensated for too.
 
 KP = 0.8
-KI = 0.15
+KI = 0.3   # 0.15->0.3 2026-07-26: upstream PR #36619 で半減された値を復帰 (中低速の権限不足対策)
 
 INTERP_SPEEDS = [1, 1.5, 2.0, 3.0, 5, 7.5, 10, 15, 30]
 KP_INTERP = [250, 120, 65, 30, 11.5, 5.5, 3.5, 2.0, KP]
@@ -108,10 +108,13 @@ class LatControlTorque(LatControl):
                                                      desired_curvature, measured_curvature, steer_limited_by_safety, output_torque)
 
       pid_log.active = True
-      pid_log.p = float(self.pid.p)
-      pid_log.i = float(self.pid.i)
-      pid_log.d = float(self.pid.d)
-      pid_log.f = float(self.pid.f)
+      # ★ NNL-8: 実際に出力を作った PID を記録する (NNLC 有効時は extension 側)。
+      # PID を分けたので self.pid をそのまま記録すると rlog の p/i/d/f 列が別物になる。
+      _lp = self.extension.output_pid or self.pid
+      pid_log.p = float(_lp.p)
+      pid_log.i = float(_lp.i)
+      pid_log.d = float(_lp.d)
+      pid_log.f = float(_lp.f)
       pid_log.output = float(-output_torque) # TODO: log lat accel?
       pid_log.actualLateralAccel = float(measurement)
       pid_log.desiredLateralAccel = float(setpoint)

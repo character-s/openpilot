@@ -12,6 +12,8 @@ ConfidenceClass = log.ModelDataV2.ConfidenceClass
 
 
 def get_curvature_from_output(output, plan, vego, lat_action_t, mlsim):
+  if (action := output.get('action')) is not None:  # RL models (deep_rl3+) output curvature*v^2 directly
+    return float(action[0, 0]) / (max(1.0, vego)) ** 2
   if not mlsim:
     if desired_curv := output.get('desired_curvature'):  # If the model outputs the desired curvature, use that directly
       return float(desired_curv[0, 0])

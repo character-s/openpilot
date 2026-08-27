@@ -32,6 +32,10 @@ class CarInterface(CarInterfaceBase):
     if DBC[candidate][Bus.pt] == "toyota_new_mc_pt_generated":
       ret.safetyConfigs[0].safetyParam |= ToyotaSafetyFlags.ALT_BRAKE.value
 
+    # Stage 1 (D): LEXUS_GS_F raised torque steering limits (panda mirror in toyota.h)
+    if candidate == CAR.LEXUS_GS_F:
+      ret.safetyConfigs[0].safetyParam |= ToyotaSafetyFlags.RAISED_STEER_LIMITS.value
+
     if ret.flags & ToyotaFlags.SECOC.value:
       ret.secOcRequired = True
       ret.safetyConfigs[0].safetyParam |= ToyotaSafetyFlags.SECOC.value
@@ -115,7 +119,19 @@ class CarInterface(CarInterfaceBase):
     # to a negative value, so it won't matter.
     ret.minEnableSpeed = -1. if stop_and_go else MIN_ACC_SPEED
 
-    if ret.flags & ToyotaFlags.TSS2:
+    # LEXUS_GS_F (TSS-P) stop tuning: apply TSS2 stopping params so approach-to-stop is
+    # smooth instead of the coarse default (creep past line, then late hard brake). 2026-07-12
+    if candidate == CAR.LEXUS_GS_F:
+      # NOTE: vEgoStopping is dead — nothing reads it anymore (stop decision moved to
+      # should_stop() in selfdrive/controls/lib/drive_helpers.py, hardcoded there as PLN-1_5).
+      # vEgoStarting / stoppingDecelRate ARE still read via CP.deprecated in longcontrol.py.
+      ret.deprecated.vEgoStopping = 0.4
+      ret.deprecated.vEgoStarting = 0.25
+      ret.deprecated.stoppingDecelRate = 0.2
+      ret.longitudinalActuatorDelay = 0.05  # hybrid quick response
+
+
+    if ret.flags & ToyotaFlags.TSS2:  # upstream moved from TSS2_CAR set to flags
       ret.flags |= ToyotaFlags.RAISED_ACCEL_LIMIT.value
 
       # Hybrids have much quicker longitudinal actuator response
