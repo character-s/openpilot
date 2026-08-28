@@ -36,6 +36,8 @@ CARCONTROLLER_PY = 'opendbc_repo/opendbc/car/toyota/carcontroller.py'
 LONGCONTROL_PY = 'openpilot/selfdrive/controls/lib/longcontrol.py'
 DRIVE_HELPERS_PY = 'openpilot/selfdrive/controls/lib/drive_helpers.py'
 LONG_MPC_PY = 'openpilot/selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py'
+# acados が生成した cost 関数。STOP_DISTANCE はここに焼き付いており、実機が見るのはこちら
+LONG_COST_C = 'openpilot/selfdrive/controls/lib/longitudinal_mpc_lib/c_generated_code/long_cost/long_cost_y_fun.c'
 MODELD_PY = 'openpilot/sunnypilot/modeld_v2/modeld.py'
 NNLC_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/nnlc/nnlc.py'
 TORQUE_EXT_BASE_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/latcontrol_torque_ext_base.py'
@@ -266,9 +268,44 @@ def test_pln1_5_stop_threshold_survives():
   assert 'PLN-1_5' in src, 'PLN-1_5 の由来コメントが消えている (なぜ 0.4 なのかが失われる)'
 
 
-def test_stop_distance_survives():
-  """PLN-1_4: 停止線までの余裕。upstream 既定より手前で止める。"""
-  assert _literal(LONG_MPC_PY, 'STOP_DISTANCE') == 8.5
+def test_stop_distance_matches_compiled_cost():
+  """STOP_DISTANCE は **コンパイル時定数**。Python 側だけ変えても実機は変わらない。
+
+  gen_long_ocp() が casadi の式に埋め込み、acados が吐いた C に焼き付く。この repo は
+  生成済み C と .so を同梱し root の `prebuilt` でビルドを飛ばすので、再生成は起きない。
+
+  ⚠ 実際に 2026-08-28 まで PLN-1_4 として 8.5 が入っていたが、生成済み C は全履歴で 6.0
+    のままで、実機の MPC は一度もその値を見ていなかった。このテストはその再発を止める。
+    ここが落ちたら「定数を書き換えれば効く」と思い込む前に、c_generated_code を
+    再生成する経路があるのかを先に確かめること。
+  """
+  py_val = _literal(LONG_MPC_PY, 'STOP_DISTANCE')
+  src = _read(LONG_COST_C)
+  # desired_dist = v^2/(2*COMFORT_BRAKE) + t_follow*v + STOP_DISTANCE
+  # 生成コードでは t_follow*v を足した直後の定数がそれ:
+  #   a4=(a4*a2); a3=(a3+a4); a4=<STOP_DISTANCE>; a3=(a3+a4);
+  m = re.search(r'a4=\(a4\*a2\);\s*a3=\(a3\+a4\);\s*a4=([0-9.]+);', src)
+  assert m, f'{LONG_COST_C}: cost 式の形が変わった。手で読み直すこと'
+  c_val = float(m.group(1))
+  assert c_val == py_val, (
+    f'long_mpc.py の STOP_DISTANCE={py_val} に対しコンパイル済み cost は {c_val}。'
+    + 'Python 側の変更は実機に効かない。停止位置を動かすなら EXTRA_STOP_DISTANCE を使う')
+
+
+def test_pln1_7_extra_stop_distance_survives():
+  """PLN-1_7: 停止時だけ x_obstacle を手前に引いて前車への詰めすぎを直す。
+
+  STOP_DISTANCE がコンパイル時定数で動かせないための runtime 側の等価操作。
+  ⚠ 前車速度でフェードするのが仕様 (常時掛けると巡航の車間まで伸びる)。
+  """
+  assert _literal(LONG_MPC_PY, 'EXTRA_STOP_DISTANCE') == 2.0
+  assert _literal(LONG_MPC_PY, 'EXTRA_STOP_DISTANCE_BP') == [1.0, 3.0]
+  src = _read(LONG_MPC_PY)
+  assert 'def get_extra_stop_distance' in src, 'get_extra_stop_distance が消えている'
+  # 実際に x_obstacle から引かれているか (定数だけ残って適用が落ちる追従事故を防ぐ)
+  assert src.count('- get_extra_stop_distance(') == 2, \
+    'lead_0_obstacle / lead_1_obstacle の両方から引かれていない'
+  assert 'PLN-1_7' in src, 'PLN-1_7 の由来コメントが消えている'
 
 
 def test_max_vel_err_survives():
