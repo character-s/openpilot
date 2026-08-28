@@ -2,8 +2,12 @@ from openpilot.common.test import OpenpilotTestCase
 from openpilot.sunnypilot.selfdrive.controls.lib.dec.dec import DynamicExperimentalController
 
 class MockLeadOne:
-  def __init__(self, present=0.0):
+  # vLead / dRel are read by the launch-fix v3 branch (_lead_departing); without
+  # them the mock raises AttributeError as soon as a lead is present.
+  def __init__(self, present=0.0, vLead=0.0, dRel=100.0):
     self.present = present
+    self.vLead = vLead
+    self.dRel = dRel
 
 class MockRadarState:
   def __init__(self, present=0.0):
@@ -75,6 +79,59 @@ class TestDynamicExperimentalController(OpenpilotTestCase):
     for _ in range(2):
       controller.update(default_sm)
     assert controller.mode() == "blended"
+
+  def test_lead_with_slowdown_prefers_blended(self, mock_cp, mock_mpc, default_sm):
+    """GS 450h reorder: a lead is present AND we need to slow down -> blended (e2e).
+
+    With the upstream order "lead detected -> acc" returns first, so the moment
+    radar acquires a target the planner drops e2e and loses the model's visual
+    look-ahead braking. Measured on route 015 (51 lead-decel scenes): upstream
+    order picked blended 0.2% of frames, this order 65.4%.
+    """
+    controller = DynamicExperimentalController(mock_cp, mock_mpc, params=MockParams())
+    controller._lead_filter = FakeKalman(value=1.0)       # ty: ignore[invalid-assignment]
+    controller._slow_down_filter = FakeKalman(value=1.0)  # ty: ignore[invalid-assignment]
+
+    for _ in range(10):
+      controller.update(default_sm)
+
+    assert controller.mode() == "blended"
+
+  def test_lead_without_slowdown_stays_acc(self, mock_cp, mock_mpc, default_sm):
+    """Steady following (no slow down needed) must stay on acc.
+
+    This is what DEC is for: cruising on MPC so the set speed is actually
+    reached, instead of the model settling below it.
+    """
+    controller = DynamicExperimentalController(mock_cp, mock_mpc, params=MockParams())
+    controller._lead_filter = FakeKalman(value=1.0)       # ty: ignore[invalid-assignment]
+    controller._slow_down_filter = FakeKalman(value=0.0)  # ty: ignore[invalid-assignment]
+
+    for _ in range(10):
+      controller.update(default_sm)
+
+    assert controller.mode() == "acc"
+
+  def test_departing_lead_beats_slowdown(self, mock_cp, mock_mpc, default_sm):
+    """launch fix v3 must stay ahead of the slow_down branch after the reorder.
+
+    If slow_down claimed the frame first, the departure stall would come back
+    (cf/seg77: blended held for ~4s while the lead kept pulling away).
+    """
+    controller = DynamicExperimentalController(mock_cp, mock_mpc, params=MockParams())
+    controller._slow_down_filter = FakeKalman(value=1.0)  # ty: ignore[invalid-assignment]
+    default_sm['carState'].standstill = True
+    default_sm['radarState'].leadOne.vLead = 1.0
+    default_sm['radarState'].leadOne.dRel = 10.0
+
+    # The first 3 frames still have standstill_count <= 3, so they fall through to
+    # slow_down and urgency=1.0 pins an emergency blended (timeout 15 / override 20).
+    # Run long enough for launch fix to take the mode back — which mirrors the real
+    # case, where the lead starts moving a second or so after we stop.
+    for _ in range(40):
+      controller.update(default_sm)
+
+    assert controller.mode() == "acc"
 
   def test_radarless_slowdown_triggers_blended(self, mock_cp, mock_mpc, default_sm):
     mock_cp.radarUnavailable = True
