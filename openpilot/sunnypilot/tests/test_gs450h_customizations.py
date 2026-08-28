@@ -494,6 +494,45 @@ def test_gs_touched_files_parse_and_have_no_conflict_markers(rel):
       pytest.fail(f"{rel} が構文エラー: line {e.lineno}: {e.msg}")
 
 
+def test_pln1_6_creep_fade_keeps_braking_compensation():
+  """PLN-1_6: creep 帯フェードは「ゼロ付近の要求を保持したとき」だけに効かせる。
+
+  07-15 のフェードは v<0.5 で PCM 補償を丸ごと落とすので、停止接近 (要求 -0.45) でも
+  補償が消え、実行率が 47-69% (他帯は 77-85%) まで落ちて最後の ~1.3m をじりじり進んでいた。
+  ⚠ この門が消えると停止がまた緩む。⚠ フェード自体を消すと 07-15 の前後脈動が戻る
+  (発火条件は 08-28 時点でも 00f に 1 件残っている)。**両方必要**。
+  """
+  src = _read(CARCONTROLLER_PY)
+  assert 'PLN-1_6' in src, 'PLN-1_6 の由来コメントが消えている (なぜ門があるかが失われる)'
+  m = re.search(r'elif self\.CP\.carFingerprint == CAR\.LEXUS_GS_F:(.*?)\n        else:',
+                src, re.DOTALL)
+  assert m, 'carcontroller.py の GS_F creep フェード分岐が見つからない'
+  body = m.group(1)
+  assert '_comp_frac' in body, 'creep 帯フェードが落ちている (07-15 の脈動対策)'
+  assert re.search(r'actuators\.accel\s*<\s*-0\.2', body), \
+      'PLN-1_6 の「明確に減速中なら補償を残す」門が落ちている'
+
+
+def test_dec_radar_mode_checks_slow_down_before_lead():
+  """DEC の `_radar_mode` は slow_down を lead より先に見ること (GS 450h 改造)。
+
+  上流の順 (lead が先) に戻ると、前車を検知した瞬間に e2e の視覚先読み減速が
+  planner の候補から丸ごと外れ、「set 速度のまま車列に近づいて急ブレーキ」が再発する。
+  route 015 の実測 (前車ありの減速シーン 51 件、`archive/probes/_dec_mode_shadow.py`):
+    上流順 = blended  0.2% (16/7992)
+    この順 = blended 65.4% (5227/7992)
+  停止時も、上流順は停止**直前**が blended 0.0% で停止後に 82.6% へ切り替わるため、
+  その切替の隙に MPC がクリープを足して前車へ詰める (user 実体験)。
+  """
+  src = _read('openpilot/sunnypilot/selfdrive/controls/lib/dec/dec.py')
+  body = src.split('def _radar_mode')[1].split('def update')[0]
+  i_dep = body.index('_lead_departing')
+  i_slow = body.index('self._has_slow_down')
+  i_lead = body.index('self._has_lead_filtered')
+  assert i_dep < i_slow, 'launch fix v3 が slow_down より後ろに落ちた = 発進のもたつきが再発する'
+  assert i_slow < i_lead, 'slow_down が lead より後ろ = 上流順に戻っている (先読み減速が消える)'
+
+
 def test_gs_touched_file_list_is_not_stale():
   """⚠ このリスト自体が腐るのを防ぐ。ファイルが移動/改名されたら _read が fail する。"""
   missing = [rel for rel in GS_TOUCHED_FILES if not (REPO_ROOT / rel).exists()]

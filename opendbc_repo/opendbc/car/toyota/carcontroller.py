@@ -308,6 +308,19 @@ class CarController(CarControllerBase, GasInterceptorCarController):
         elif self.CP.carFingerprint == CAR.LEXUS_GS_F:
           # creep band (v<0.5): fade out PCM compensation to avoid limit cycle vs creep torque
           _comp_frac = float(np.interp(CS.out.vEgo, [0.5, 1.0], [0.0, 1.0]))
+          # PLN-1_6: but keep full compensation while we are clearly braking to a stop.
+          # The 07-15 limit cycle came from *holding* a near-zero request (-0.03) against
+          # creep torque, not from stopping, so gating on the request separates the two.
+          # Measured 08-28 (archive/probes/_stop_dawdle.py):
+          #   - stopping asks for -0.45 but only -0.21..-0.26 comes out below 0.5 m/s
+          #     (47-69% of the request, vs 77-85% above it) — that shortfall is why the
+          #     car crawled the last ~1.3 m instead of stopping
+          #   - the limit-cycle condition (v 0.15-0.6 with |accel|<0.15 held >=1 s) ran
+          #     0.078 s/seg on b3 (OPM10V3 + DEC ON, before this fade) but only
+          #     0.005 s/seg over 218 seg of current routes, and every occurrence is a
+          #     near-zero request, so they stay faded exactly as before
+          if actuators.accel < -0.2:
+            _comp_frac = 1.0
           pcm_accel_cmd = actuators.accel + (pcm_accel_cmd - actuators.accel) * _comp_frac
         else:
           pcm_accel_cmd = actuators.accel
