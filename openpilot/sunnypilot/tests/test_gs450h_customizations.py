@@ -494,6 +494,26 @@ def test_gs_touched_files_parse_and_have_no_conflict_markers(rel):
       pytest.fail(f"{rel} が構文エラー: line {e.lineno}: {e.msg}")
 
 
+def test_dec_radar_mode_checks_slow_down_before_lead():
+  """DEC の `_radar_mode` は slow_down を lead より先に見ること (GS 450h 改造)。
+
+  上流の順 (lead が先) に戻ると、前車を検知した瞬間に e2e の視覚先読み減速が
+  planner の候補から丸ごと外れ、「set 速度のまま車列に近づいて急ブレーキ」が再発する。
+  route 015 の実測 (前車ありの減速シーン 51 件、`archive/probes/_dec_mode_shadow.py`):
+    上流順 = blended  0.2% (16/7992)
+    この順 = blended 65.4% (5227/7992)
+  停止時も、上流順は停止**直前**が blended 0.0% で停止後に 82.6% へ切り替わるため、
+  その切替の隙に MPC がクリープを足して前車へ詰める (user 実体験)。
+  """
+  src = _read('openpilot/sunnypilot/selfdrive/controls/lib/dec/dec.py')
+  body = src.split('def _radar_mode')[1].split('def update')[0]
+  i_dep = body.index('_lead_departing')
+  i_slow = body.index('self._has_slow_down')
+  i_lead = body.index('self._has_lead_filtered')
+  assert i_dep < i_slow, 'launch fix v3 が slow_down より後ろに落ちた = 発進のもたつきが再発する'
+  assert i_slow < i_lead, 'slow_down が lead より後ろ = 上流順に戻っている (先読み減速が消える)'
+
+
 def test_gs_touched_file_list_is_not_stale():
   """⚠ このリスト自体が腐るのを防ぐ。ファイルが移動/改名されたら _read が fail する。"""
   missing = [rel for rel in GS_TOUCHED_FILES if not (REPO_ROOT / rel).exists()]
