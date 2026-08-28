@@ -25,6 +25,24 @@ CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
 
+# PLN-1_8 (2026-08-29): e2e の action ヘッドは -2.7 付近で飽和する。route 016 の信号停止では
+# 同じモデルの経路 (modelV2.acceleration) が -3.3 を描いているのに action は -2.67 止まりで、
+# 止まりきれずにドライバーがブレーキを踏んだ。経路が -3.0..-3.5 を描いた 51 フレームは
+# action が全部 -2.6x に潰れており、分布の裾ではなく飽和。壁はモデルの中にあって外からは
+# 動かせないので、**同じモデルの経路**を持ってきて min() を取り、床で開け幅を決める。
+#
+# ⚠ 定数オフセットやスケールでは代用できない。壁に当たっていない route (00e、走行 11377
+#   フレーム) で経路方式は 0 件なのに、一律 -0.4 は 2 件・1.25 倍も 2 件発火する。
+#   **床を付けても減らない** — 誤発火は -2.10 -> -2.50 で床 -3.0 に届かないため。
+#   床は「どこまで深くするか」の摘みで、「いつ発火するか」には関与しない。門になるのは
+#   min() の方で、経路が action より浅ければ自動的に何も起きない。
+# ⚠ modeld ではなく planner に置く。modeld で潰すと modelV2.action の記録値が補正後になり、
+#   壁の位置をログから測り続けられなくなる (計測 = archive/probes/_e2e_accel_ceiling.py)。
+E2E_ACCEL_PATH_GATE = -2.0   # これより深い要求のときだけ経路を見る
+E2E_ACCEL_PATH_FLOOR = -3.0  # ここより深くはしない (ACCEL_MIN -3.5 に 0.5 残す)
+E2E_ACCEL_PATH_N = 9         # 経路の先頭 0.6s (ModelConstants.T_IDXS[8] = 0.625)
+E2E_ACCEL_PATH_RC = 0.15     # 経路 min の平滑 (modeld の LONG_SMOOTH_SECONDS と同じ桁)
+
 # Lookup table for turns
 _A_TOTAL_MAX_V = [1.7, 3.2]
 _A_TOTAL_MAX_BP = [20., 40.]
@@ -65,6 +83,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.allow_throttle = True
 
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
+    self.e2e_path_accel = FirstOrderFilter(0.0, E2E_ACCEL_PATH_RC, self.dt)  # PLN-1_8
     self.a_cruise = init_a
     self.output_a_target = init_a
     self.output_should_stop = False
@@ -137,6 +156,17 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     output_should_stop_mpc = should_stop(v_ego, output_a_target_mpc)
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
+
+    # PLN-1_8: action ヘッドの飽和を、同じモデルの経路で補う。⚠ 門が閉じている間もフィルタは
+    # 回す (開いた瞬間に古い値を出さないため)。shouldStop はモデルの判断のまま触らない。
+    # ⚠ capnp のリストは直接スライスしない。この repo の作法は np.array() 経由
+    #   (sunnypilot/.../vision_controller.py と同じ)。
+    accel_path = sm['modelV2'].acceleration.x
+    if len(accel_path) >= E2E_ACCEL_PATH_N:
+      path_accel = float(np.min(np.array(accel_path)[:E2E_ACCEL_PATH_N]))
+      self.e2e_path_accel.update(float(np.clip(path_accel, ACCEL_MIN, ACCEL_MAX)))
+      if output_a_target_e2e < E2E_ACCEL_PATH_GATE:
+        output_a_target_e2e = max(min(output_a_target_e2e, self.e2e_path_accel.x), E2E_ACCEL_PATH_FLOOR)
 
     is_e2e = self.is_e2e(sm)
 
