@@ -38,7 +38,8 @@ class OsmMapData(BaseMapData):
       # consumers (mapd, SmartCruiseControlMap) had no way to tell a fresh fix from a 36 s cold
       # start pointing at the middle of the Pacific. Stamp both so they can refuse to use it.
       "valid": bool(self.localizer_valid),
-      "unixMillis": int(time.time() * 1e3),
+      # a wall clock is the point here: consumers compare this against their own now() to age the fix
+      "unixMillis": int(time.time() * 1e3),  # noqa: TID251
     }
 
     if self.last_bearing is not None:
