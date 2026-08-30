@@ -8,6 +8,7 @@ See the LICENSE.md file in the root directory for more details.
 
 from collections.abc import Callable
 import os
+import traceback
 os.environ['GMMU'] = '0'
 import numpy as np
 import threading
@@ -98,19 +99,31 @@ def _egpu_lock_holder() -> str:
 def _load_with_retry(make_model, attempts: int = EGPU_LOAD_ATTEMPTS, wait: float = EGPU_LOCK_RETRY_WAIT):
   """Call make_model up to `attempts` times, retrying only on am_usb lock contention.
 
-  Returns (model, error); model is None when every attempt failed."""
-  last: Exception | None = None
+  Returns (model, error); model is None when every attempt failed.
+
+  ⚠⚠ 返すのは **1 回目の例外**。tinygrad は候補インターフェースを順に試し、1 つ目で
+  am_usb ロックを取ったまま初期化に失敗すると、2 つ目以降が **自分が残したロック**と
+  ぶつかる。最後の例外を返すと **本当の失敗理由が毎回「ロック競合」に化ける**
+  (08-30 に踏んだ: eGPU が 10 連敗したログが全部 `lock holder = 自分自身` で、
+  「なぜ GPU を掴めなかったのか」が 1 件も残っていなかった)。
+  """
+  first: Exception | None = None
+  cloudlog.warning(f"eGPU load starting (lock holder before: {_egpu_lock_holder()})")
   for attempt in range(1, attempts + 1):
     try:
       return make_model(), None
     except Exception as e:  # an unhandled exception in the load thread would die silently
-      last = e
+      if first is None:
+        first = e
+        # ⚠ ExceptionGroup は repr だと 1 行に潰れ、どの経路がどこで落ちたかはサブ例外の
+        #   traceback にしか無い。1 回目だけ全部展開して残す。
+        cloudlog.error("eGPU load attempt 1 failed:\n" + "".join(traceback.format_exception(e)))
       if not _is_lock_contention(e) or attempt == attempts:
         break
       cloudlog.warning(f"eGPU lock held (attempt {attempt}/{attempts}), retry in {wait}s (holder: {_egpu_lock_holder()})")
       time.sleep(wait)
   cloudlog.error(f"eGPU model load failed (lock holder: {_egpu_lock_holder()})")
-  return None, last
+  return None, first
 
 
 def _pkl_exists(path):

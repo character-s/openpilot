@@ -104,7 +104,9 @@ def save_dmesg_snapshot(tag: str = "") -> Path | None:
     d.mkdir(parents=True, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y-%m-%d--%H-%M-%S")
     path = d / f"dmesg-{ts}{tag}.log"
-    path.write_text(out[-200000:])          # 末尾 200KB だけ (リングバッファ全体だと大きい)
+    # ⚠ c4 の dmesg は wlan のビーコン処理ログでほぼ埋まる (08-30 実測: 末尾 200KB の 9 割以上)。
+    #   USB / GPU の行が押し出されて使い物にならないので落とす。
+    path.write_text("\n".join(ln for ln in out.splitlines() if "wlan:" not in ln)[-200000:] + "\n")
     cloudlog.warning(f"save_dmesg_snapshot: {path}")
     return path
   except Exception:
