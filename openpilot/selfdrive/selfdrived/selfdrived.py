@@ -53,6 +53,9 @@ MonitoringPolicy = log.DriverMonitoringState.MonitoringPolicy
 TurnDirection = custom.ModelDataV2SP.TurnDirection
 
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
+# GS450h: big model のロード完了後、安全チェックを抑止し続ける猶予。
+# この窓の間は NO_ENTRY も出し続けないと「チェックは死んでいるのに engage は通る」穴になる。
+BIG_MODEL_WARMUP = 5.
 
 
 class SelfdriveD(CruiseHelper):
@@ -200,7 +203,11 @@ class SelfdriveD(CruiseHelper):
       self.big_model_ready_t = time.monotonic()
       self.events_sp.add(custom.OnroadEventSP.EventName.bigModelReady)
     self.big_model_loading = loading
-    if self.big_model_loading:
+    # GS450h: ロード完了後の warmup 窓 (all_checks() を抑止している間) も NO_ENTRY を維持する。
+    # ⚠ upstream はロード中しか出さないので、warmup の数秒だけ「安全チェックは死んでいるのに
+    #   engage を止めるものが何も無い」窓が開く。08-29 に 125km/h でここに入り、modelV2 も
+    #   liveParameters も 0 件のまま engage できて op_tq -1147 になった。
+    if self.big_model_loading or time.monotonic() < self.big_model_ready_t + BIG_MODEL_WARMUP:
       self.events.add(EventName.bigModelLoading)
 
     big_active = self.params.get("ChestnutActive")
@@ -431,8 +438,14 @@ class SelfdriveD(CruiseHelper):
     # generic catch-all. ideally, a more specific event should be added above instead
     has_disable_events = self.events.contains(ET.NO_ENTRY) and (self.events.contains(ET.SOFT_DISABLE) or self.events.contains(ET.IMMEDIATE_DISABLE))
     no_system_errors = (not has_disable_events) or (len(self.events) == num_events)
-    warmup_sec = 5.
-    big_model_settling = self.big_model_loading or time.monotonic() < self.big_model_ready_t + warmup_sec
+    # GS450h: 免除するのは **engage していないとき** だけにする。
+    # ⚠ upstream はロード中〜完了 +warmup の間 all_checks() / posenet / paramsd の判定をまるごと
+    #   飛ばすが、"bigModelLoading" の NO_ENTRY はロード中しか出ない。その差分 (=warmup の窓) では
+    #   engage を止めるものが何も無いまま安全チェックだけが死んでいる。08-29 に実測:
+    #   modelV2 0 件 / liveParameters 0 件のまま 125km/h で engage でき、
+    #   VehicleModel が既定値のままなので error 30m/s^2 -> LatControl 飽和 -> op_tq -1147。
+    settling_window = self.big_model_loading or time.monotonic() < self.big_model_ready_t + BIG_MODEL_WARMUP
+    big_model_settling = settling_window and not self.enabled
     if not self.sm.all_checks() and no_system_errors and not big_model_settling:  # the load holds modelV2 and friends back on purpose
       if not self.sm.all_alive():
         self.events.add(EventName.commIssue)
