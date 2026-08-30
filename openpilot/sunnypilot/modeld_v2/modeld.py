@@ -17,7 +17,7 @@ from tinygrad.tensor import Tensor
 
 import openpilot.cereal.messaging as messaging
 from openpilot.common.hardware import COMMA_HARDWARE
-from openpilot.selfdrive.modeld.helpers import chestnut_present, load_oob, reset_chestnut
+from openpilot.selfdrive.modeld.helpers import chestnut_present, load_oob, reset_chestnut, save_dmesg_snapshot
 from openpilot.cereal import log
 from opendbc.car.structs import car
 from openpilot.cereal.services import SERVICE_LIST
@@ -431,6 +431,8 @@ def main(demo=False):
     if model is None:
       why = repr(load_err) if load_err else f"no result after {BIG_MODEL_TIMEOUT}s"
       cloudlog.error(f"eGPU model load failed or timed out ({why}); falling back to small model")
+      # GS450h: 落ちる直前のカーネルログを残す (再起動で dmesg が消えるため)。
+      save_dmesg_snapshot("-loadfail")
       # GS450h: GPU がハングしたままだと放置すると次のロードも失敗する。small で走り続ける裏で
       # USB を再列挙しておき、次の起動でクリーンなデバイスを掴めるようにする
       # (08-29 まではこれが無く「車を再起動するまで Big Model Failed」だった)。
@@ -637,6 +639,7 @@ if __name__ == "__main__":
     # "Wait timeout" は GPU がハングしたまま残るので、プロセスを殺し直すだけでは
     # 次のロードも失敗する。manager 側の再起動 (restart_on_crash) と対で効く。
     try:
+      save_dmesg_snapshot("-crash")
       if Params().get_bool("ChestnutActive"):
         reset_chestnut()
     except Exception:
