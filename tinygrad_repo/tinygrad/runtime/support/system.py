@@ -139,19 +139,31 @@ class _System:
     usb.pcie_cfg_req(pci.PCI_COMMAND, bus=gpu_bus, dev=0, fn=0, value=pci.PCI_COMMAND_IO | pci.PCI_COMMAND_MEMORY | pci.PCI_COMMAND_MASTER, size=1)
     return bars
 
+  @functools.cached_property
+  def _held_locks(self) -> dict[str, int]: return {}
+
   def flock_acquire(self, name:str) -> int:
     import fcntl # to support windows
+
+    # Re-acquiring the same lock from this same process must reuse the fd we already have. flock is
+    # per open file description, so opening the file again and locking it blocks on the lock this
+    # very process is holding. Without this, a caller that retries after a failed device init is
+    # told "the lock is held" forever - by itself - and leaks the fd it opened on every attempt.
+    if (cached:=self._held_locks.get(name)) is not None: return cached
 
     os.umask(0) # Set umask to 0 to allow creating files with 0666 permissions
 
     # Avoid O_CREAT because we don’t want to re-create/replace an existing file (triggers extra perms checks) when opening as non-owner.
-    if os.path.exists(lock_name:=temp(name)): self.lock_fd = os.open(lock_name, os.O_RDWR)
-    else: self.lock_fd = os.open(lock_name, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o666)
+    if os.path.exists(lock_name:=temp(name)): fd = os.open(lock_name, os.O_RDWR)
+    else: fd = os.open(lock_name, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o666)
 
-    try: fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError: raise RuntimeError(f"Failed to acquire lock file {name}. `sudo lsof {lock_name}` may help identify the process holding the lock.")
+    try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+      os.close(fd) # a leaked fd here would make every later attempt from this process collide with itself
+      raise RuntimeError(f"Failed to acquire lock file {name}. `sudo lsof {lock_name}` may help identify the process holding the lock.")
 
-    return self.lock_fd
+    self._held_locks[name] = self.lock_fd = fd
+    return fd
 
 System = _System()
 

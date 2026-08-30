@@ -123,8 +123,12 @@ def _egpu_lock_holder() -> str:
     held = []
     with open("/proc/locks") as f:
       for line in f:
-        # 例: "1: FLOCK  ADVISORY  WRITE 1234 08:01:12345 0 EOF"  (待機中の行は "-> " が入る)
-        cols = line.replace("->", " ").split()
+        # 例: "1: FLOCK  ADVISORY  WRITE 1234 08:01:12345 0 EOF"
+        # ⚠⚠ "2: -> FLOCK ..." は **ロック待ちの行で保持者ではない**。潰して読むと
+        #   「待っているだけの自分」を「握っている自分」と誤読する (08-30 に踏みかけた)。
+        raw = line.split()
+        waiting = len(raw) > 1 and raw[1] == "->"
+        cols = (raw[:1] + raw[2:]) if waiting else raw
         if len(cols) < 6 or cols[1] != "FLOCK":
           continue
         ino = cols[5].rsplit(":", 1)[-1]
@@ -136,7 +140,7 @@ def _egpu_lock_holder() -> str:
               comm = cf.read().strip()
           except OSError:
             comm = "gone"
-          held.append(f"{cols[4]}({'me' if cols[4] == str(me) else 'other'}:{comm})")
+          held.append(f"{cols[4]}({'me' if cols[4] == str(me) else 'other'}:{comm}:{'WAIT' if waiting else 'HELD'})")
     parts.append(f"flock_held_by={held or 'nobody'}")
 
     out = subprocess.run(["fuser", "-v"] + locks, capture_output=True, text=True, timeout=5)
