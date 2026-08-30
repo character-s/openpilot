@@ -71,9 +71,10 @@ class ManagerProcess(ABC):
   restart_on_crash = False
   crash_count = 0
   last_crash_t = 0.0
+  last_start_t = 0.0
   MAX_RESTARTS = 5        # 起動して即死を繰り返すときに無限再起動しないための上限
   RESTART_BACKOFF = 10.0  # eGPU が落ち着く前に掴み直しても また落ちるので待つ
-  CRASH_FORGET = 300.0    # これだけ正常に動いたら再発カウントを忘れる
+  CRASH_FORGET = 300.0    # プロセスが **これだけ生きられたら** 再発カウントを忘れる
 
   def reap_if_crashed(self) -> None:
     """GS450h: クラッシュ済みのプロセスを掃除して start() が再起動できるようにする。
@@ -90,10 +91,18 @@ class ManagerProcess(ABC):
     if self.proc.exitcode is None:
       return
     now = time.monotonic()
-    if self.last_crash_t and now - self.last_crash_t > self.CRASH_FORGET:
-      self.crash_count = 0
+    # ⚠⚠ 忘却の基準は **起動してから生きた時間**。「最後のクラッシュからの経過」にすると、
+    #   一度も復帰できていなくても CRASH_FORGET 秒ごとにカウントが 0 に戻り、
+    #   **上限を無視して永久に再試行し続ける** (08-30 に実車で踏んだ: 5/5 で諦めた 5 分後に
+    #   復活し、以後 5 分おきに再起動 -> クラッシュ -> USB リセットを繰り返して eGPU を叩き続けた)。
+    # ⚠⚠ 諦めの判定を **忘却より先に** 行う。逆にすると、一度も復帰できていないのに
+    #   時間経過だけでカウントが 0 に戻り、上限を無視して永久に再試行し続ける。
+    #   一度諦めたら、この onroad の間は二度と再試行しない (復旧は車の再起動)。
     if self.crash_count >= self.MAX_RESTARTS:
-      return  # 諦める。無モデルのままだが、それは既存のガードが engage を止める側の話
+      return  # 無モデルのままだが、engage は既存のガード (processNotRunning) が止める
+    # プロセスが CRASH_FORGET 以上 **生きられた** なら安定したとみなしてカウントを忘れる。
+    if self.last_start_t and now - self.last_start_t > self.CRASH_FORGET:
+      self.crash_count = 0
     if self.last_crash_t and now - self.last_crash_t < self.RESTART_BACKOFF:
       return
     self.crash_count += 1
@@ -187,6 +196,7 @@ class NativeProcess(ManagerProcess):
     cloudlog.info(f"starting process {self.name}")
     self.proc = Process(name=self.name, target=self.launcher, args=(self.cmdline, cwd, self.name))
     self.proc.start()
+    self.last_start_t = time.monotonic()
     self.shutting_down = False
 
 
