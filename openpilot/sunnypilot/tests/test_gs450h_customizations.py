@@ -469,7 +469,7 @@ UPSTREAM_CONTRACT = [
   ),
   (
     'openpilot/selfdrive/modeld/helpers.py',
-    ['usbgpu_present'],
+    ['chestnut_present'],
     'chestnut が挿さっているかの判定。modeld と UI の両方が使う',
   ),
 ]
