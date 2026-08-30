@@ -16,6 +16,9 @@ from openpilot.common.swaglog import cloudlog
 
 MODELS_DIR = Path(__file__).resolve().parent / 'models'
 
+# 落ちたときのスナップショット置き場 (crash ログと同じところ)。テストから差し替えられるよう定数にしてある。
+CRASH_DIR = Path('/data/community/crashes')
+
 
 def modeld_pkl_path(chestnut: bool):
   prefix = 'big_' if chestnut else ''
