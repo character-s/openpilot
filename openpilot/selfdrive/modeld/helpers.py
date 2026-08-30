@@ -81,22 +81,28 @@ def _chestnut_devnode(d: Path) -> Path | None:
     return None
 
 
-def reset_chestnut(settle: float = 1.0, deep: bool = True) -> bool:
+def reset_chestnut(settle: float = 1.0, deep: bool = False) -> bool:
   """chestnut (eGPU) の USB デバイスをリセットする (GS450h 追加)。
 
   ⚠ tinygrad の AMD-over-USB backend が GPU ハング ("Wait timeout: 3000 ms!") を起こすと、
   modeld を殺し直すだけでは復帰しないことがある。08-29 の実走では
   「車を再起動するまで Big Model Failed のまま」だった。
 
-  手段は 2 つあり、**既定では両方続けて実行する**:
+  ⚠⚠ **08-30 実車で判明: `authorized` 0->1 は使ってはいけない**。chestnut は USB 経由で
+  PCIe をトンネルするデバイス (`pcieLtssm` があるのはそのため) で、**再列挙すると PCIe が
+  張り直されず `no pcie` で二度とロードできなくなる**。実際 08-30 の実ハングで
+  `eGPU model load failed: No interface for AMD:0 is available / RuntimeError('no pcie')` に陥り、
+  **車を再起動するまで復帰しなかった**。⚠ 08-29 に offroad で「両方やってもデバイスを失わない」
+  ことは確認したが、**あれは GPU が正常なときのテスト**でハング後の PCIe 再確立は見ていなかった。
+  ⇒ **`deep` は既定 False**。使うのは「電源断以外に手が無いと分かっている」場合だけ。
+
+  手段は 2 つある:
     1. USBDEVFS_RESET — devnode (/dev/bus/usb/<bus>/<dev>) は root グループで rw なので
        **sudo 不要**。ドライバを外さない軽いリセット。
-    2. sysfs の authorized 0 -> 1 — 切り離して再認証する強い手。root 専用なので sudo 経由
-       (openpilot は User=comma で動く)。
+    2. sysfs の authorized 0 -> 1 (`deep=True`) — ⚠⚠ **PCIe を壊すので既定では使わない**。
 
-  ⚠⚠ 1 だけにしないのは、**GPU がハングしていても ioctl は成功を返す**ため。戻り値では
-  効いたか判定できず、1 を繰り返すだけで復帰しない恐れがある。08-29 に実機 (offroad) で
-  2 の安全性も確認済み: deauthorize 中も sysfs エントリは残り、再認証で devnum ごと復帰する。
+  ⚠ ioctl は GPU がハングしていても成功を返すので、戻り値では効いたか判定できない。
+  それでも 2 を既定にしないのは、上のとおり **2 は状況を悪化させる**ため。
 
   ⚠ 例外は投げない。呼び出し元は「落ちる直前 / ロード失敗時の保険」として使い、
   戻り値を見て次の手 (プロセス終了 -> manager による再起動) に進む。
