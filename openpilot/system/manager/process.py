@@ -68,6 +68,38 @@ class ManagerProcess(ABC):
   enabled = True
   name = ""
   shutting_down = False
+  restart_on_crash = False
+  crash_count = 0
+  last_crash_t = 0.0
+  MAX_RESTARTS = 5        # 起動して即死を繰り返すときに無限再起動しないための上限
+  RESTART_BACKOFF = 10.0  # eGPU が落ち着く前に掴み直しても また落ちるので待つ
+  CRASH_FORGET = 300.0    # これだけ正常に動いたら再発カウントを忘れる
+
+  def reap_if_crashed(self) -> None:
+    """GS450h: クラッシュ済みのプロセスを掃除して start() が再起動できるようにする。
+
+    ⚠ upstream は proc が残っている限り start() を no-op にするので、落ちたプロセスは
+    走行が終わるまで復活しない。modeld_tinygrad は chestnut の GPU ハング
+    (tinygrad hcq "Wait timeout: 3000 ms!") で落ちるため、**1 走行まるごと無モデル**になる。
+    08-29 実測: modelV2 が 0 件のまま engage でき、op_tq -1147 で右へ持って行かれた。
+    プロセスを殺し直すと am_usb の flock も tinygrad の状態も消えるので、
+    再起動すれば big model のまま復帰できる (小モデルへの降格が不要)。
+    """
+    if not self.restart_on_crash or self.proc is None or self.shutting_down:
+      return
+    if self.proc.exitcode is None:
+      return
+    now = time.monotonic()
+    if self.last_crash_t and now - self.last_crash_t > self.CRASH_FORGET:
+      self.crash_count = 0
+    if self.crash_count >= self.MAX_RESTARTS:
+      return  # 諦める。無モデルのままだが、それは既存のガードが engage を止める側の話
+    if self.last_crash_t and now - self.last_crash_t < self.RESTART_BACKOFF:
+      return
+    self.crash_count += 1
+    self.last_crash_t = now
+    cloudlog.error(f"{self.name} exited with {self.proc.exitcode}, restarting ({self.crash_count}/{self.MAX_RESTARTS})")
+    self.proc = None
 
   @abstractmethod
   def start(self) -> None:
@@ -132,13 +164,14 @@ class ManagerProcess(ABC):
 
 
 class NativeProcess(ManagerProcess):
-  def __init__(self, name, cwd, cmdline, should_run, enabled=True, sigkill=False):
+  def __init__(self, name, cwd, cmdline, should_run, enabled=True, sigkill=False, restart_on_crash=False):
     self.name = name
     self.cwd = cwd
     self.cmdline = cmdline
     self.should_run = should_run
     self.enabled = enabled
     self.sigkill = sigkill
+    self.restart_on_crash = restart_on_crash
     self.launcher = nativelauncher
 
   def start(self) -> None:
@@ -146,6 +179,7 @@ class NativeProcess(ManagerProcess):
     if self.shutting_down:
       self.stop()
 
+    self.reap_if_crashed()
     if self.proc is not None:
       return
 
