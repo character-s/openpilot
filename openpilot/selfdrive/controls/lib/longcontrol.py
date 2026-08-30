@@ -77,7 +77,7 @@ class LongControl:
     self.last_output_accel = 0.0
     self.go_timer = 0.0    # PLN-3: seconds shouldStop has been continuously false
     self.lead_timer = 0.0  # PLN-3: seconds hasLead has been continuously true
-    # PLN-3: which model is driving. UsbGpuActive is cleared on manager start / ignition and is
+    # PLN-3: which model is driving. ChestnutActive is cleared on manager start / ignition and is
     # only set true once the big model has actually loaded on the eGPU, so "not yet loaded" and
     # "no eGPU at all" both read false = the conservative side.
     self._params = params or Params()
@@ -100,7 +100,7 @@ class LongControl:
     # model takes ~80s to load, so this flips mid-drive - reading it once at init would miss it.
     self._frame += 1
     if self._frame % int(1. / DT_CTRL) == 0:
-      self._big_model = self._params.get_bool("UsbGpuActive")
+      self._big_model = self._params.get_bool("ChestnutActive")
 
     nolead_sustain = PLN3_GO_SUSTAIN_NOLEAD_BIG if self._big_model else PLN3_GO_SUSTAIN_NOLEAD
     go_sustain = PLN3_GO_SUSTAIN_LEAD if self.lead_timer >= PLN3_LEAD_SUSTAIN else nolead_sustain
