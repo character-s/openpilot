@@ -129,7 +129,14 @@ def _egpu_lock_holder() -> str:
           continue
         ino = cols[5].rsplit(":", 1)[-1]
         if ino.isdigit() and int(ino) in inodes:
-          held.append(f"{cols[4]}({'me' if cols[4] == str(me) else 'other'})")
+          # ⚠ PID だけだと後から誰か分からない (08-30: 保持者 8132 は swaglog に 1 行も
+          #   残っておらず、modeld ですらなかった)。comm を一緒に採る。
+          try:
+            with open(f"/proc/{cols[4]}/comm") as cf:
+              comm = cf.read().strip()
+          except OSError:
+            comm = "gone"
+          held.append(f"{cols[4]}({'me' if cols[4] == str(me) else 'other'}:{comm})")
     parts.append(f"flock_held_by={held or 'nobody'}")
 
     out = subprocess.run(["fuser", "-v"] + locks, capture_output=True, text=True, timeout=5)
