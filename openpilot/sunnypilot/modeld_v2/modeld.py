@@ -83,15 +83,58 @@ def _is_lock_contention(e: BaseException) -> bool:
 
 
 def _egpu_lock_holder() -> str:
-  """Who is holding the am_usb lock. Diagnosis only - never raises."""
+  """Who is holding the am_usb lock. Diagnosis only - never raises.
+
+  ⚠⚠ **`fuser` は「ファイルを開いているプロセス」しか教えてくれない**。flock を実際に
+  保持しているかは `/proc/locks` にしか出ない。08-30 に fuser の出力だけを見て
+  「自分がロックを握っている」と読んだが、**開いているだけの可能性と区別できていなかった**
+  (tinygrad の `flock_acquire` は `os.open` してから flock するので、**flock に失敗しても
+  fd は開いたまま残る**。しかも fd を `System` シングルトンの属性に上書き代入するため、
+  2 回目以降は前の fd が閉じられずに漏れる)。⇒ 3 つを分けて出す:
+
+    my_fds        自分が開いている lock ファイルの fd (漏れの数)
+    flock_held_by flock を **実際に保持している** PID (me / other)
+    fuser         開いているだけのプロセス一覧 (従来の情報)
+  """
   import glob
   import subprocess
   try:
     locks = glob.glob("/tmp/am_usb:*.lock")
     if not locks:
       return "no lock file"
+    me = os.getpid()
+    parts = [f"pid={me}"]
+
+    mine = []
+    for fd in os.listdir(f"/proc/{me}/fd"):
+      try:
+        if "am_usb" in os.readlink(f"/proc/{me}/fd/{fd}"):
+          mine.append(fd)
+      except OSError:
+        pass
+    parts.append(f"my_fds={mine}")
+
+    inodes = set()
+    for path in locks:
+      try:
+        inodes.add(os.stat(path).st_ino)
+      except OSError:
+        pass
+    held = []
+    with open("/proc/locks") as f:
+      for line in f:
+        # 例: "1: FLOCK  ADVISORY  WRITE 1234 08:01:12345 0 EOF"  (待機中の行は "-> " が入る)
+        cols = line.replace("->", " ").split()
+        if len(cols) < 6 or cols[1] != "FLOCK":
+          continue
+        ino = cols[5].rsplit(":", 1)[-1]
+        if ino.isdigit() and int(ino) in inodes:
+          held.append(f"{cols[4]}({'me' if cols[4] == str(me) else 'other'})")
+    parts.append(f"flock_held_by={held or 'nobody'}")
+
     out = subprocess.run(["fuser", "-v"] + locks, capture_output=True, text=True, timeout=5)
-    return " ".join((out.stdout + out.stderr).split())[:300] or "nobody"
+    parts.append("fuser=" + (" ".join((out.stdout + out.stderr).split())[:150] or "nobody"))
+    return " ".join(parts)
   except Exception:
     return "unknown"
 
