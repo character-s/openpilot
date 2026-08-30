@@ -72,9 +72,13 @@ class ManagerProcess(ABC):
   crash_count = 0
   last_crash_t = 0.0
   last_start_t = 0.0
-  MAX_RESTARTS = 5        # 起動して即死を繰り返すときに無限再起動しないための上限
-  RESTART_BACKOFF = 10.0  # eGPU が落ち着く前に掴み直しても また落ちるので待つ
-  CRASH_FORGET = 300.0    # プロセスが **これだけ生きられたら** 再発カウントを忘れる
+  RESTART_BACKOFF = 10.0      # 最初の再起動までの待ち。以後クラッシュのたびに倍にする
+  RESTART_BACKOFF_MAX = 300.0 # 連続して落ちるときの待ちの上限
+  CRASH_FORGET = 300.0        # プロセスが **これだけ生きられたら** 再発カウントを忘れる
+
+  def restart_backoff(self) -> float:
+    """連続クラッシュのたびに待ちを倍にして、上限で頭打ちにする。"""
+    return min(self.RESTART_BACKOFF * (2 ** self.crash_count), self.RESTART_BACKOFF_MAX)
 
   def reap_if_crashed(self) -> None:
     """GS450h: クラッシュ済みのプロセスを掃除して start() が再起動できるようにする。
@@ -85,29 +89,30 @@ class ManagerProcess(ABC):
     08-29 実測: modelV2 が 0 件のまま engage でき、op_tq -1147 で右へ持って行かれた。
     プロセスを殺し直すと am_usb の flock も tinygrad の状態も消えるので、
     再起動すれば big model のまま復帰できる (小モデルへの降格が不要)。
+
+    ⚠⚠ **回数で諦めてはいけない**。08-30 実車で確認: GPU ハング後の再ロードは
+    30-60 秒間隔だと **10 回連続で `no pcie` に終わり**、**4 分 28 秒空けた 1 回**で
+    復帰した (08:32:22 ハング -> 08:55:03 `models loaded in 37.5s`、無モデル 18 分)。
+    失敗した試行と成功した試行の違いは **間隔だけ**で、USBDEVFS_RESET を打った直後に
+    掴みに行くと PCIe の再確立が終わっておらず `no pcie` + `am_usb lock` で必ず落ちる。
+    ⇒ 5 回で打ち切る設計だとこの復帰を永久に取り逃す。効くのは回数制限ではなく
+    **待ち時間**なので、クラッシュのたびに倍にして RESTART_BACKOFF_MAX で頭打ちにする。
     """
     if not self.restart_on_crash or self.proc is None or self.shutting_down:
       return
     if self.proc.exitcode is None:
       return
     now = time.monotonic()
-    # ⚠⚠ 忘却の基準は **起動してから生きた時間**。「最後のクラッシュからの経過」にすると、
-    #   一度も復帰できていなくても CRASH_FORGET 秒ごとにカウントが 0 に戻り、
-    #   **上限を無視して永久に再試行し続ける** (08-30 に実車で踏んだ: 5/5 で諦めた 5 分後に
-    #   復活し、以後 5 分おきに再起動 -> クラッシュ -> USB リセットを繰り返して eGPU を叩き続けた)。
-    # ⚠⚠ 諦めの判定を **忘却より先に** 行う。逆にすると、一度も復帰できていないのに
-    #   時間経過だけでカウントが 0 に戻り、上限を無視して永久に再試行し続ける。
-    #   一度諦めたら、この onroad の間は二度と再試行しない (復旧は車の再起動)。
-    if self.crash_count >= self.MAX_RESTARTS:
-      return  # 無モデルのままだが、engage は既存のガード (processNotRunning) が止める
     # プロセスが CRASH_FORGET 以上 **生きられた** なら安定したとみなしてカウントを忘れる。
+    # ⚠ 忘却の基準を「最後のクラッシュからの経過」にしないこと。一度も復帰できていないのに
+    #   カウントが 0 に戻り、下の待ち時間がいつまでも伸びなくなる。
     if self.last_start_t and now - self.last_start_t > self.CRASH_FORGET:
       self.crash_count = 0
-    if self.last_crash_t and now - self.last_crash_t < self.RESTART_BACKOFF:
+    if self.last_crash_t and now - self.last_crash_t < self.restart_backoff():
       return
     self.crash_count += 1
     self.last_crash_t = now
-    cloudlog.error(f"{self.name} exited with {self.proc.exitcode}, restarting ({self.crash_count}/{self.MAX_RESTARTS})")
+    cloudlog.error(f"{self.name} exited with {self.proc.exitcode}, restarting (attempt {self.crash_count}, next wait {self.restart_backoff():.0f}s)")
     self.proc = None
 
   @abstractmethod
