@@ -1,3 +1,4 @@
+import datetime
 import fcntl
 import io
 import json
@@ -78,6 +79,31 @@ def _chestnut_devnode(d: Path) -> Path | None:
   try:
     return Path(f"/dev/bus/usb/{int((d / 'busnum').read_text()):03d}/{int((d / 'devnum').read_text()):03d}")
   except Exception:
+    return None
+
+
+def save_dmesg_snapshot(tag: str = "") -> Path | None:
+  """クラッシュ直前のカーネルログを crash ログの隣に残す (GS450h 追加、08-30)。
+
+  ⚠⚠ journald は永続化されていない (`/var/log/journal` 無し) ので、**再起動すると dmesg は消える**。
+  chestnut のハングは「USB 層で何か起きたのか」がカーネルログでしか判定できない
+  (`deviceState` は約 2Hz で、SMU が止まるのは 0.5s 未満の出来事なので瞬断は写らない)。
+  08-30 は偶然 `dmesg -wT` を流していたから crash 前の USB イベントがゼロだと確認できたが、
+  常駐プロセスは再起動で消えるので、**落ちる側で残す**。
+
+  ⚠ 例外は投げない。保存できなくても modeld の終了処理を止めない。
+  """
+  try:
+    out = subprocess.run(["dmesg", "-T"], capture_output=True, text=True, timeout=10).stdout
+    d = Path("/data/community/crashes")
+    d.mkdir(parents=True, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y-%m-%d--%H-%M-%S")
+    path = d / f"dmesg-{ts}{tag}.log"
+    path.write_text(out[-200000:])          # 末尾 200KB だけ (リングバッファ全体だと大きい)
+    cloudlog.warning(f"save_dmesg_snapshot: {path}")
+    return path
+  except Exception:
+    cloudlog.exception("save_dmesg_snapshot failed")
     return None
 
 
