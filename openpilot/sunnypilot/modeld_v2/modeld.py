@@ -370,7 +370,9 @@ class ModelState(ModelStateBase):
     if self._combined_model_type == 'supercombo':
       model_output = raw_outputs.numpy().flatten()
       if self.chestnut and not np.all(np.isfinite(model_output)):
-        raise RuntimeError("model output not finite")
+        # GS450h: 上流はここで raise するが、1 フレーム捨てるだけで走行は続けられる (09-01 user 判断)。
+        cloudlog.error("model output not finite, dropping frame")
+        return None
       sliced = {k: model_output[np.newaxis, v] for k, v in self.vision_output_slices.items()}
       outputs = self.parser.parse_outputs(sliced)
       if 'prev_feat' in self.numpy_inputs:
@@ -497,20 +499,21 @@ def main(demo=False):
     params.put_bool("ChestnutActive", model is not None)
     if model is None:
       why = repr(load_err) if load_err else f"no result after {BIG_MODEL_TIMEOUT}s"
-      cloudlog.error(f"eGPU model load failed or timed out ({why}); falling back to small model")
       # GS450h: 落ちる直前のカーネルログを残す (再起動で dmesg が消えるため)。
       save_stdio_snapshot("-loadfail")
       save_dmesg_snapshot("-loadfail")
-      # GS450h: GPU がハングしたままだと放置すると次のロードも失敗する。small で走り続ける裏で
-      # USB を再列挙しておき、次の起動でクリーンなデバイスを掴めるようにする
+      # GS450h: GPU がハングしたままだと何度ロードしても失敗する。ここで USB を再列挙してから
+      # 死んでおけば、manager が再起動したときにクリーンなデバイスを掴み直せる
       # (08-29 まではこれが無く「車を再起動するまで Big Model Failed」だった)。
       reset_chestnut()
+      # ⚠ 上流 (6831cf5e79) はここで small model へ降格して走り続けるが、GS 450h では採らない:
+      # big と small の実力差が大きく、restart_on_crash (5 回 / 10s backoff) で big の再ロードを
+      # 粘る方が良い (user 判断 09-01)。上限まで失敗したら bigModelFailed が engage を止める。
+      raise RuntimeError(f"eGPU model load failed or timed out ({why})")
+  else:
+    model = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=False)
 
-  small_model = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=False) if model is None or CHESTNUT else None
-  if model is None:
-    model = small_model
   params.put_bool("ChestnutLoading", False)
-  assert model is not None
   cloudlog.warning(f"models loaded in {time.monotonic() - st:.1f}s, modeld starting")
 
   # messaging
@@ -642,25 +645,9 @@ def main(demo=False):
       inputs['action_t'] = np.array([lat_action_t, long_action_t], dtype=np.float32)
 
     mt1 = time.perf_counter()
-    try:
-      send_chestnut = (chestnut_state is not None and
-                       run_count % round(model.constants.MODEL_FREQ / SERVICE_LIST['chestnutState'].frequency) == 0)
-      model_output = model.run(bufs, transforms, inputs, prepare_only, chestnut_state.send if send_chestnut else None)
-    except Exception:
-      if not params.get_bool("ChestnutActive"):
-        raise
-      cloudlog.exception("chestnut failed, falling back to small")
-      # GS450h: なぜ big が落ちたかは GPU の割り込み print と dmesg にしか残らない (再起動で消える)。
-      # small へ降格して走り続ける前に、その瞬間のログを保存しておく (次のハング解析用)。
-      save_stdio_snapshot("-fallback")
-      save_dmesg_snapshot("-fallback")
-      params.put_bool("ChestnutActive", False)
-      assert small_model is not None
-      model = small_model
-      if chestnut_state is not None:
-        chestnut_state.big = False
-      run_count = 0
-      model_output = None
+    send_chestnut = (chestnut_state is not None and
+                     run_count % round(model.constants.MODEL_FREQ / SERVICE_LIST['chestnutState'].frequency) == 0)
+    model_output = model.run(bufs, transforms, inputs, prepare_only, chestnut_state.send if send_chestnut else None)
     mt2 = time.perf_counter()
     model_execution_time = mt2 - mt1
 
