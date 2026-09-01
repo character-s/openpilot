@@ -89,6 +89,7 @@ class SelfdriveD(CruiseHelper):
     self.big_model_active = False
     self.big_model_failed = False
     self.big_model_ready_t = 0.
+    self.big_model_announced = False
 
     # Setup sockets
     self.pm = messaging.PubMaster(['selfdriveState', 'onroadEvents'] + ['selfdriveStateSP', 'onroadEventsSP'])
@@ -199,16 +200,24 @@ class SelfdriveD(CruiseHelper):
       self.startup_event = None
 
     loading = self.params.get_bool("ChestnutLoading")
+    if loading:
+      self.big_model_announced = False  # 再ロード (restart_on_crash) でもまた鳴らせるように
     if self.big_model_loading and not loading:
       self.big_model_ready_t = time.monotonic()
-      self.events_sp.add(custom.OnroadEventSP.EventName.bigModelReady)
     self.big_model_loading = loading
     # GS450h: ロード完了後の warmup 窓 (all_checks() を抑止している間) も NO_ENTRY を維持する。
     # ⚠ upstream はロード中しか出さないので、warmup の数秒だけ「安全チェックは死んでいるのに
     #   engage を止めるものが何も無い」窓が開く。08-29 に 125km/h でここに入り、modelV2 も
     #   liveParameters も 0 件のまま engage できて op_tq -1147 になった。
-    if self.big_model_loading or time.monotonic() < self.big_model_ready_t + BIG_MODEL_WARMUP:
+    warming_up = self.big_model_loading or time.monotonic() < self.big_model_ready_t + BIG_MODEL_WARMUP
+    if warming_up:
       self.events.add(EventName.bigModelLoading)
+    elif self.big_model_ready_t and not self.big_model_announced:
+      # GS450h: Ready の音は warmup 窓が閉じて本当に engage できるようになってから鳴らす。
+      # upstream はロード完了の瞬間に鳴らすが、その直後 5 秒は上の窓が NO_ENTRY を出すので
+      # 「Ready と言われたのに main を押すと準備中」になる (user 09-01)。
+      self.events_sp.add(custom.OnroadEventSP.EventName.bigModelReady)
+      self.big_model_announced = True
 
     big_active = self.params.get("ChestnutActive")
     chestnut_present = self.sm['deviceState'].chestnutPresent
