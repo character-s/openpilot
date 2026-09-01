@@ -60,6 +60,10 @@ class USB3:
     if checked(libusb.libusb_kernel_driver_active)(self.handle, 0):
       checked(libusb.libusb_detach_kernel_driver)(self.handle, 0)
       checked(libusb.libusb_reset_device)(self.handle)
+      # GS450h: libusb detach uses DISCONNECT_CLAIM (claims iface 0 for us) and reset_device
+      # re-claims it, so set_configuration below would hit EBUSY against our own claim.
+      # Reproduced 2026-09-01 via raw ioctls; releasing first makes it pass. claim_interface re-takes it.
+      libusb.libusb_release_interface(self.handle, 0)  # best-effort: NOT_FOUND when nothing to release
 
     # Set configuration and claim interface
     checked(libusb.libusb_set_configuration)(self.handle, 1)
