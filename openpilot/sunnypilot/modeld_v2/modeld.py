@@ -650,6 +650,10 @@ def main(demo=False):
       if not params.get_bool("ChestnutActive"):
         raise
       cloudlog.exception("chestnut failed, falling back to small")
+      # GS450h: なぜ big が落ちたかは GPU の割り込み print と dmesg にしか残らない (再起動で消える)。
+      # small へ降格して走り続ける前に、その瞬間のログを保存しておく (次のハング解析用)。
+      save_stdio_snapshot("-fallback")
+      save_dmesg_snapshot("-fallback")
       params.put_bool("ChestnutActive", False)
       assert small_model is not None
       model = small_model
