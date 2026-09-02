@@ -13,6 +13,13 @@
 #include "common/swaglog.h"
 #include "panda/board/comms_definitions.h"
 #include "selfdrive/pandad/panda_comms.h"
+#include <atomic>
+#include <unistd.h>
+
+// GS 450h 09-02 exp E2: set by pandad_can_send around panda->can_send(). Any multi-chunk bulk transfer
+// on the main thread yields between chunks while a send is pending, so STEERING_LKA never waits
+// for a whole RX batch (memory project_gs_steer_fault_pandad_jitter).
+std::atomic<bool> panda_send_pending{false};
 
 
 #define SPI_SYNC 0x5AU
@@ -159,6 +166,12 @@ int PandaSpiHandle::bulk_transfer(uint8_t endpoint, uint8_t *tx_data, uint16_t t
   uint16_t length = (tx_data != NULL) ? tx_len : rx_len;
   for (int i = 0; i < (int)std::ceil((float)length / xfer_size); i++) {
     int d;
+    // exp E2: RX batches only (tx_data == NULL); the sender itself must never wait on this flag
+    if (tx_data == NULL && i > 0) {
+      for (int k = 0; k < 30 && panda_send_pending.load(); ++k) {
+        usleep(100);
+      }
+    }
     if (tx_data != NULL) {
       int len = std::min(xfer_size, tx_len - (xfer_size * i));
       d = spi_transfer_retry(endpoint, tx_data + (xfer_size * i), len, NULL, 0, timeout);

@@ -10,7 +10,9 @@ import numpy as np
 import pytest
 
 from openpilot.sunnypilot.selfdrive.controls.lib import lane_centering_params as lcp
-from openpilot.sunnypilot.selfdrive.controls.lib.lane_centering import LaneCenteringController
+from openpilot.sunnypilot.selfdrive.controls.lib.lane_centering import (
+  LaneCenteringController, _deadband_for, _gain_for, _lookahead_min_for,
+)
 
 
 _V_EGO = 20.0
@@ -59,7 +61,7 @@ def _converge(model, *, offset=0.0, authority=0.0, speed=_V_EGO):
     {"enabled": False},
     {"active": False},
     {"valid": False},
-    {"speed": 4.9},
+    {"speed": 2.4},   # 09-02: 門は 2.5 m/s (9km/h)。旧 5.0
   ],
 )
 def test_hard_gates_are_noop(kwargs):
@@ -107,7 +109,7 @@ def test_hard_gates_still_drop_correction_immediately():
   (再 engage で古い補正から平滑が再開する)。
   """
   model = _model(left=-1.5, right=2.1)
-  for gate in ({"active": False}, {"valid": False}, {"speed": 4.9}):
+  for gate in ({"active": False}, {"valid": False}, {"speed": 2.4}):
     controller, centered = _converge(model)
     assert centered > 0.0
     assert _update(controller, model, **gate) == 0.0
@@ -215,9 +217,9 @@ def test_correction_is_smoothed_and_capped():
 
 # ── ここから GS 向けに追加 ─────────────────────────────────────────────
 
-@pytest.mark.parametrize("speed", [12.0, 15.0, 20.0, 30.0])
+@pytest.mark.parametrize("speed", [12.5, 15.0, 20.0, 30.0])
 def test_effective_gain_is_speed_invariant_in_lat_accel(speed):
-  """la 換算のゲインが 8-35 m/s で 0.6 × (|err| - deadband) になること。
+  """la 換算のゲインが 12.5-35 m/s (09-02: 下端 8 → 12.5 = 低速スケジュールの上端) で 0.6 × (|err| - deadband) になること。
 
   これが「big の復元勾配 g = 0.0017-0.0035 /m と同オーダー = P だけで平衡点が動く」という
   採否判断の根拠なので、実装から実際にその値が出ることを固定する (memory
@@ -238,7 +240,33 @@ def test_low_speed_saturates_at_the_curvature_cap(speed):
   それでも big の復元項 g·d0 ≈ 0.001 より大きいので、平衡点を動かす向きは変わらない。
   """
   _, steady = _converge(_model(left=-1.5, right=2.1), speed=speed)
-  assert np.isclose(steady, 0.004 * 0.30, atol=1e-6)
+  # 09-02: 低速スケジュール後は cap 0.004 × 速度ゲイン (5.5/8.0 m/s = 1.0 → 0.004、10 m/s = 0.689 → 0.00276)。
+  #   上限 _MAX_RAW_CORRECTION 自体は据え置きなので「頭打ちになる」構造は変わらない。
+  assert np.isclose(steady, 0.004 * _gain_for(speed), rtol=1e-2)   # 300 frame の平滑残差 (tau 0.4s) を許す
+
+
+def test_lowspeed_schedule_leaves_high_speed_untouched():
+  """09-02 の低速スケジュールは 12.5 m/s (45km/h) 以上を一切変えないこと (user「速度が出ているときは真ん中で良い」)。"""
+  for v in (12.5, 15.0, 20.0, 30.0):
+    assert _gain_for(v) == pytest.approx(0.30)
+    assert _deadband_for(v) == pytest.approx(0.08)
+    assert _lookahead_min_for(v) == pytest.approx(8.0)
+  assert _gain_for(8.0) == pytest.approx(1.0)
+  assert _deadband_for(8.0) == pytest.approx(0.04)
+  assert _lookahead_min_for(5.0) == pytest.approx(6.0)
+
+
+def test_lowspeed_acts_on_small_error_but_high_speed_does_not():
+  """6cm の左寄り: 低速 (5.5 m/s) では不感帯 0.04 を超えて補正が出る / 20 m/s では不感帯 0.08 の中で 0 のまま。
+
+  IDM は <18km/h で計画が +0.12〜0.18m 左、29-45km/h で +0.06〜0.09m 左 (09-02 の `_lane_analysis.py`
+  速度帯別表)。旧定数では 29-45km/h の寄りが不感帯に丸ごと入っていて LC が何もしていなかった。
+  """
+  model = _model(left=-1.74, right=1.86)   # 中心 +0.06 (右) = 車が 6cm 左
+  _, low = _converge(model, speed=5.5)
+  _, high = _converge(model, speed=20.0)
+  assert low > 1e-4
+  assert high == 0.0
 
 
 def test_narrow_lane_gate_stays_at_upstream_value():
