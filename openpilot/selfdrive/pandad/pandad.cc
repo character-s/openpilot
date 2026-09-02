@@ -1,3 +1,5 @@
+#include <atomic>
+#include <unistd.h>
 #include "selfdrive/pandad/pandad.h"
 
 #include <array>
@@ -68,6 +70,17 @@ Panda *connect(std::string serial) {
   return panda.release();
 }
 
+// GS 450h 09-02 exp E/E2: give the sendcan path priority over the main loop's SPI transfers.
+// The 10Hz panda-state iteration (with #38464 turnaround waits) uses up the RateKeeper slack; the main
+// thread then re-takes hw_lock transfer after transfer and the sender starves for a whole period
+// (STEERING_LKA arrives 20ms late, bunched with the next frame -> Toyota EPS temp fault).
+extern std::atomic<bool> panda_send_pending;  // defined in spi.cc
+static inline void wait_for_sender() {
+  for (int i = 0; i < 30 && panda_send_pending.load(); ++i) {
+    usleep(100);
+  }
+}
+
 void can_send_thread(Panda *panda, bool fake_send) {
   util::set_thread_name("pandad_can_send");
 
@@ -90,7 +103,9 @@ void can_send_thread(Panda *panda, bool fake_send) {
     // Don't send if older than 1 second
     if ((nanos_since_boot() - event.getLogMonoTime() < 1e9) && !fake_send) {
       LOGT("sending sendcan to panda: %s", (panda->hw_serial()).c_str());
+      panda_send_pending = true;
       panda->can_send(event.getSendcan());
+      panda_send_pending = false;
       LOGT("sendcan sent to panda: %s", (panda->hw_serial()).c_str());
     } else {
       LOGE("sendcan too old to send: %" PRIu64 ", %" PRIu64, nanos_since_boot(), event.getLogMonoTime());
@@ -390,10 +405,12 @@ void pandad_run(Panda *panda) {
 
   // Main loop: receive CAN first, then process lower priority panda and peripheral state.
   while (!do_exit && check_connected(panda)) {
+    wait_for_sender();
     can_recv(panda, &pm);
 
     // Process peripheral state at 20 Hz
     if (rk.frame() % 5 == 0) {
+      wait_for_sender();
       process_peripheral_state(panda, &pm, no_fan_control, is_onroad);
     }
 
@@ -406,16 +423,19 @@ void pandad_run(Panda *panda) {
       }
       engaged_mads = process_mads_heartbeat(&sm);
       always_offroad = panda_safety.getOffroadMode();
+      wait_for_sender();
       process_panda_state(panda, &pm, engaged, engaged_mads, is_onroad, spoofing_started, always_offroad);
       panda_safety.configureSafetyMode(is_onroad);
     }
 
     // Send out peripheralState at 2Hz
     if (rk.frame() % 50 == 0) {
+      wait_for_sender();
       send_peripheral_state(panda, &pm);
     }
 
     // Forward logs from panda to cloudlog if available
+    wait_for_sender();
     std::string log = panda->serial_read();
     if (!log.empty()) {
       if (log.find("Register 0x") != std::string::npos) {

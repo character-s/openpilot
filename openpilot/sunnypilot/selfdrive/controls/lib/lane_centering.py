@@ -49,7 +49,7 @@ def _smooth(val, prev_val, tau, dt):
   return alpha * val + (1 - alpha) * prev_val
 
 
-_MIN_V_EGO = 5.0
+_MIN_V_EGO = 2.5             # 09-02: 5.0 (18km/h) → 2.5 (9km/h)。渋滞・低速で左に寄るため (memory lateral_nlcc 09-02)
 _MIN_LANE_PROB = 0.6
 _MAX_LANE_STD = 0.3
 _MIN_LANE_WIDTH = 2.6        # ⚠ 原版どおり。08-26 実測で幅 p01 = 2.59m / 2.6m 未満は 1.14% しか
@@ -58,7 +58,24 @@ _MAX_LANE_WIDTH = 4.8
 _MAX_OFFSET = 0.3
 _MIN_CENTER_TO_LINE = 1.1    # offset を掛けても白線からこれだけは残す (GS 半車幅 0.92m + 余裕)
 _MAX_RAW_CORRECTION = 0.004  # [1/m] gain 前の生の曲率上限
-_MAX_GAIN = 0.30             # 実効上限 = 0.0012 1/m (GS 換算で舵角 ~3 度)
+_MAX_GAIN = 0.30             # 実効上限 = 0.0012 1/m (GS 換算で舵角 ~3 度) — 45km/h 以上はこの値のまま
+# ★ 09-02 低速スケジュール (user「低速で左に寄る」)。IDM は <18km/h で計画自体が +0.12〜0.18m 左で、
+#   ゲイン 0.30 / 不感帯 0.08 では 29-45km/h でも計画と実測が同じ = big の押し返しに負けていた。
+#   45km/h 以上は中心 ±2cm で良好なのでそこは変えず、29→45km/h で線形に現行値へ戻す。
+#   補正曲率の絶対上限 _MAX_RAW_CORRECTION は据え置き (20km/h で横 G 0.12 m/s²)。
+_LOWSPEED_V = (8.0, 12.5)    # [m/s] 29〜45km/h で切り替え
+_LOWSPEED_GAIN = 1.0
+_LOWSPEED_DEADBAND = 0.04    # [m] (現行 0.08)
+_LOWSPEED_LOOKAHEAD_MIN = 6.0  # [m] (現行 8.0)
+
+def _gain_for(v_ego: float) -> float:
+  return float(np.interp(v_ego, _LOWSPEED_V, (_LOWSPEED_GAIN, _MAX_GAIN)))
+
+def _deadband_for(v_ego: float) -> float:
+  return float(np.interp(v_ego, _LOWSPEED_V, (_LOWSPEED_DEADBAND, _CENTER_ERROR_DEADBAND)))
+
+def _lookahead_min_for(v_ego: float) -> float:
+  return float(np.interp(v_ego, _LOWSPEED_V, (_LOWSPEED_LOOKAHEAD_MIN, 8.0)))
 _SMOOTH_TAU = 0.4
 _SIGNAL_RELEASE_TAU = 0.20
 _CONFIDENCE_RELEASE_TAU = 0.20
@@ -243,7 +260,7 @@ class LaneCenteringController:
       # 白線を見失った瞬間に補正を切ると段差になるので、0.2s で抜く
       return model_curvature + self._release(_CONFIDENCE_RELEASE_TAU)
 
-    target = float(np.clip(raw_correction, -_MAX_RAW_CORRECTION, _MAX_RAW_CORRECTION)) * _MAX_GAIN
+    target = float(np.clip(raw_correction, -_MAX_RAW_CORRECTION, _MAX_RAW_CORRECTION)) * _gain_for(v_ego)
     self._correction = float(_smooth(target, self._correction, _SMOOTH_TAU, self.dt))
     return model_curvature + self._correction
 
@@ -279,7 +296,7 @@ class LaneCenteringController:
         return False, 0.0
 
       # lookahead = v (m) ≒ 1 秒先。ここを見ることで ψ 項が D として入る (docstring 参照)
-      lookahead = float(np.clip(v_ego, 8.0, 35.0))
+      lookahead = float(np.clip(v_ego, _lookahead_min_for(v_ego), 35.0))
       if not all(self._covers(x, lookahead) for x in (left_x, right_x, pos_x)):
         return False, 0.0
 
@@ -307,10 +324,11 @@ class LaneCenteringController:
       model_y = float(np.interp(lookahead, pos_x, pos_y))
       error = target_y - model_y
       error_abs = abs(error)
-      if error_abs <= _CENTER_ERROR_DEADBAND:
+      deadband = _deadband_for(v_ego)
+      if error_abs <= deadband:
         error = 0.0
       else:
-        error = np.copysign(error_abs - _CENTER_ERROR_DEADBAND, error)
+        error = np.copysign(error_abs - deadband, error)
 
       # e2e authority: モデルが自信を持って (path std が小さい) 大きく外している = 障害物回避の
       # 可能性があるので補正を譲る。⚠ 既定は原版どおり 1.0 = 譲る (0 にすると構造変化の保護が
