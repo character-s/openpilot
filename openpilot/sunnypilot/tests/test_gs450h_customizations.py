@@ -48,6 +48,10 @@ LC_PARAMS_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/lane_centering_param
 MICI_MODELS_PY = 'openpilot/selfdrive/ui/sunnypilot/mici/layouts/models.py'
 MICI_TOGGLES_PY = 'openpilot/selfdrive/ui/mici/layouts/settings/toggles.py'
 PARAMS_KEYS_H = 'openpilot/common/params_keys.h'
+PANDAD_CC = 'openpilot/selfdrive/pandad/pandad.cc'
+SPI_CC = 'openpilot/selfdrive/pandad/spi.cc'
+# ⚠ ソースではなく **配布されるバイナリ**。C++ の改造はここに焼かれていないと実機で効かない
+PANDAD_BIN = 'openpilot/selfdrive/pandad/pandad'
 
 
 # ---------------------------------------------------------------------------
@@ -516,6 +520,7 @@ GS_TOUCHED_FILES = [
   'openpilot/selfdrive/controls/lib/latcontrol_torque.py',
   'openpilot/sunnypilot/selfdrive/controls/lib/dec/dec.py',
   'openpilot/sunnypilot/selfdrive/controls/lib/latcontrol_torque_ext.py',
+  PANDAD_CC, SPI_CC,
 ]
 
 
@@ -568,6 +573,30 @@ def test_dec_radar_mode_checks_slow_down_before_lead():
   i_lead = body.index('self._has_lead_filtered')
   assert i_dep < i_slow, 'launch fix v3 が slow_down より後ろに落ちた = 発進のもたつきが再発する'
   assert i_slow < i_lead, 'slow_down が lead より後ろ = 上流順に戻っている (先読み減速が消える)'
+
+
+def test_pandad_binary_carries_the_send_priority_patch():
+  """⚠⚠ E2 (SPI 送信優先) は C++ なので、**ソースだけ直っていても実機には効かない**。
+
+  release は SConstruct を落としているので c4 では scons が走らず、配られた prebuilt が
+  そのまま動く。c4 の実機で焼いても `updated` の finalize が working tree を git の内容に
+  戻すため、**焼いたバイナリを fork に置く以外に E2 を車載し続ける手段が無い** (09-03 に実測。
+  09-02 に焼いた E2 はその夜の finalize で消えており、翌日の走行は E2 無しだった)。
+
+  ⇒ 追従で上流の prebuilt に戻ったらここで落ちる。落ちたら c4 で焼き直して差し替えること:
+     `archive/probes/_c4_scons_build.ps1 -Pandad -Apply -KeepDefs -AcceptBaseline`
+     → `scp comma@<c4>:/data/openpilot/openpilot/selfdrive/pandad/pandad` → この位置に置く
+  ⚠ 上流が pandad を再ビルドした追従では、**古い依存でリンクされた fork のバイナリを残さない**こと
+    (バイナリで競合するので気付ける)。機序と実測は memory `project_gs_steer_fault_pandad_jitter`。
+  """
+  for rel in (PANDAD_CC, SPI_CC):
+    assert 'panda_send_pending' in _read(rel), f'{rel} の E2 パッチ (送信優先フラグ) が落ちている'
+
+  blob = (REPO_ROOT / PANDAD_BIN).read_bytes()
+  assert b'panda_send_pending' in blob, (
+    'pandad のバイナリが上流の配布版に戻っている = ソースが直っていても実機では E2 が効かない。'
+    'c4 で焼き直してこのファイルを差し替えること (手順は docstring)'
+  )
 
 
 def test_gs_touched_file_list_is_not_stale():
