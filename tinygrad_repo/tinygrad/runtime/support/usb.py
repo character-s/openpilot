@@ -1,3 +1,4 @@
+import os
 import ctypes, struct, time, functools, itertools
 from typing import Any, cast
 from tinygrad.runtime.autogen import libusb
@@ -16,6 +17,54 @@ def checked(fn, msg=None):
     if (rc:=fn(*args)) < 0: raise RuntimeError(f"{msg or fn.__name__}: {ctypes.string_at(libusb.libusb_strerror(rc)).decode()}")
     return rc
   return wrapper
+
+
+# ---- GS 450h 09-02 v3: raw usbfs helpers (memory project user_driving_model, 節 09-02) ----
+import fcntl as _fcntl, struct as _struct, sys as _sys
+_USBDEVFS_RELEASEINTF = 0x80045510
+_USBDEVFS_GETDRIVER = 0x41045508
+
+def _gs_devnode(handle) -> str:
+  dev = libusb.libusb_get_device(handle)
+  return f"/dev/bus/usb/{libusb.libusb_get_bus_number(dev):03d}/{libusb.libusb_get_device_address(dev):03d}"
+
+def _gs_own_fds(devnode: str) -> list[int]:
+  out = []
+  for n in os.listdir("/proc/self/fd"):
+    try:
+      if os.readlink(f"/proc/self/fd/{n}") == devnode: out.append(int(n))
+    except OSError: pass
+  return out
+
+def _gs_getdriver(fd: int, iface: int = 0) -> str:
+  buf = bytearray(_struct.pack("I", iface) + bytes(256))
+  try:
+    _fcntl.ioctl(fd, _USBDEVFS_GETDRIVER, buf)
+    return buf[4:].split(b"\0", 1)[0].decode(errors="replace") or "?"
+  except OSError as e:
+    return f"none({e.errno})"
+
+def _gs_log(tag: str, handle):
+  try:
+    dn = _gs_devnode(handle); fds = _gs_own_fds(dn)
+    drv = _gs_getdriver(fds[0]) if fds else "no-fd"
+    print(f"[usb-v3] {tag}: devnode={dn} own_fds={fds} driver(if0)={drv}", file=_sys.stderr, flush=True)
+  except Exception as e:
+    print(f"[usb-v3] {tag}: log failed {e!r}", file=_sys.stderr, flush=True)
+
+def _gs_raw_release(handle, iface: int = 0):
+  """libusb の帳簿を経由せず、この process が持つ devnode の全 fd に RELEASEINTERFACE を出す (best-effort)"""
+  try:
+    dn = _gs_devnode(handle)
+    for fd in _gs_own_fds(dn):
+      try:
+        _fcntl.ioctl(fd, _USBDEVFS_RELEASEINTF, _struct.pack("I", iface))
+        print(f"[usb-v3] RELEASEINTF ok fd={fd}", file=_sys.stderr, flush=True)
+      except OSError as e:
+        print(f"[usb-v3] RELEASEINTF fd={fd} errno={e.errno}", file=_sys.stderr, flush=True)
+  except Exception as e:
+    print(f"[usb-v3] raw release failed {e!r}", file=_sys.stderr, flush=True)
+# ---- end v3 helpers ----
 
 class USB3:
   @staticmethod
@@ -57,15 +106,25 @@ class USB3:
     assert self.product.startswith("custom") or self.product.startswith("AS2462")
 
     # Detach kernel driver if needed
+    _gs_log('before-detach-check', self.handle)
     if checked(libusb.libusb_kernel_driver_active)(self.handle, 0):
       checked(libusb.libusb_detach_kernel_driver)(self.handle, 0)
       checked(libusb.libusb_reset_device)(self.handle)
       # GS450h: libusb detach uses DISCONNECT_CLAIM (claims iface 0 for us) and reset_device
       # re-claims it, so set_configuration below would hit EBUSY against our own claim.
       # Reproduced 2026-09-01 via raw ioctls; releasing first makes it pass. claim_interface re-takes it.
-      libusb.libusb_release_interface(self.handle, 0)  # best-effort: NOT_FOUND when nothing to release
+      # 09-02: release alone was a no-op. libusb_release_interface() returns NOT_FOUND *without* issuing the
+      # RELEASEINTF ioctl unless the handle's own claimed_interfaces bit is set, and detach_kernel_driver's
+      # DISCONNECT_CLAIM never sets that bit. So claim first (kernel claim is already ours -> succeeds and
+      # sets the bit), then release actually reaches the kernel. Both best-effort.
+      libusb.libusb_claim_interface(self.handle, 0)
+      libusb.libusb_release_interface(self.handle, 0)
 
     # Set configuration and claim interface
+    # v3: whatever libusb thinks, drop any usbfs claim this process holds on iface 0 before SETCONFIG
+    _gs_log('before-setconfig', self.handle)
+    _gs_raw_release(self.handle, 0)
+    _gs_log('after-raw-release', self.handle)
     checked(libusb.libusb_set_configuration)(self.handle, 1)
     checked(libusb.libusb_claim_interface)(self.handle, 0)
     checked(libusb.libusb_set_interface_alt_setting)(self.handle, 0, 0)
