@@ -52,6 +52,22 @@ PANDAD_CC = 'openpilot/selfdrive/pandad/pandad.cc'
 SPI_CC = 'openpilot/selfdrive/pandad/spi.cc'
 # ⚠ ソースではなく **配布されるバイナリ**。C++ の改造はここに焼かれていないと実機で効かない
 PANDAD_BIN = 'openpilot/selfdrive/pandad/pandad'
+# 09-03 に追加 (追従 8 回目で「テストが見ていない改造」を棚卸しした分)
+CARSTATE_PY = 'opendbc_repo/opendbc/car/toyota/carstate.py'
+CAR_EVENTS_PY = 'openpilot/selfdrive/car/car_events.py'
+LONG_PLANNER_PY = 'openpilot/selfdrive/controls/lib/longitudinal_planner.py'
+SELFDRIVED_PY = 'openpilot/selfdrive/selfdrived/selfdrived.py'
+MODELD_HELPERS_PY = 'openpilot/selfdrive/modeld/helpers.py'
+PROCESS_PY = 'openpilot/system/manager/process.py'
+PROCESS_CONFIG_PY = 'openpilot/system/manager/process_config.py'
+OSM_MAP_DATA_PY = 'openpilot/sunnypilot/mapd/live_map_data/osm_map_data.py'
+FILL_MODEL_MSG_PY = 'openpilot/sunnypilot/modeld_v2/fill_model_msg.py'
+PARSE_OUTPUTS_PY = 'openpilot/sunnypilot/modeld_v2/parse_model_outputs.py'
+MICI_SOFTWARE_PY = 'openpilot/selfdrive/ui/mici/layouts/settings/software.py'
+MICI_BUTTON_PY = 'openpilot/selfdrive/ui/mici/widgets/button.py'
+# ⚠ tinygrad 本体へのパッチ。上流が tinygrad を総入れ替えするたびに (09-02 に 1 回目) ここが競合する
+TG_SYSTEM_PY = 'tinygrad_repo/tinygrad/runtime/support/system.py'
+TG_USB_PY = 'tinygrad_repo/tinygrad/runtime/support/usb.py'
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +393,21 @@ def test_lane_centering_tuning_survives():
   assert _literal(LC_PY, '_WIDTH_JUMP_LIMIT') == 0.50, '幅急変ガード (GS 独自の追加) が落ちている'
 
 
+def test_lane_centering_lowspeed_schedule_survives():
+  """09-02: 渋滞・低速で左に寄るため、低速帯だけ不感帯と先読みを詰めるスケジュール。
+
+  ⚠ 09-03 判定 = <18km/h だけ効き始めた / 18-29 は不発 / ≥45 不変 (memory lateral_nlcc 09-03)。
+  次段 (_MAX_RAW_CORRECTION 0.004→0.006) は低速 overshoot 悪化で**保留**。ここは値の存在だけ見る。
+  """
+  assert _literal(LC_PY, '_MIN_V_EGO') == 2.5, '有効下限が 5.0 (18km/h) に戻っている = 渋滞帯で LC が効かない'
+  assert _literal(LC_PY, '_LOWSPEED_V') == (8.0, 12.5)
+  assert _literal(LC_PY, '_LOWSPEED_GAIN') == 1.0
+  assert _literal(LC_PY, '_LOWSPEED_DEADBAND') == 0.04
+  assert _literal(LC_PY, '_LOWSPEED_LOOKAHEAD_MIN') == 6.0
+  assert re.search(r'_LOWSPEED_V\b', _read(LC_PY).split('_LOWSPEED_V =', 1)[1]), \
+    '_LOWSPEED_V が定義されているだけで使われていない = 定数だけ載って本体が落ちた'
+
+
 # ===========================================================================
 # 4) modeld (chestnut / eGPU)
 # ===========================================================================
@@ -521,6 +552,10 @@ GS_TOUCHED_FILES = [
   'openpilot/sunnypilot/selfdrive/controls/lib/dec/dec.py',
   'openpilot/sunnypilot/selfdrive/controls/lib/latcontrol_torque_ext.py',
   PANDAD_CC, SPI_CC,
+  # 09-03 追加
+  CARSTATE_PY, CAR_EVENTS_PY, LONG_PLANNER_PY, SELFDRIVED_PY, MODELD_HELPERS_PY,
+  PROCESS_PY, PROCESS_CONFIG_PY, OSM_MAP_DATA_PY, FILL_MODEL_MSG_PY, PARSE_OUTPUTS_PY,
+  MICI_SOFTWARE_PY, MICI_BUTTON_PY, TG_SYSTEM_PY, TG_USB_PY,
 ]
 
 
@@ -603,3 +638,206 @@ def test_gs_touched_file_list_is_not_stale():
   """⚠ このリスト自体が腐るのを防ぐ。ファイルが移動/改名されたら _read が fail する。"""
   missing = [rel for rel in GS_TOUCHED_FILES if not (REPO_ROOT / rel).exists()]
   assert not missing, f"GS 改造ファイルが見つからない (上流が移動/改名した?): {missing}"
+
+
+# ===========================================================================
+# 9) 09-03 棚卸しで追加 — 追従 8 回目まで「テストが見ていなかった」改造
+# ===========================================================================
+
+def _class_literal(rel: str, cls: str, name: str):
+  """`class <cls>:` 直下の `name = <リテラル>` (クラス属性)。_literal はトップレベルしか見ない。"""
+  for node in ast.parse(_read(rel), filename=rel).body:
+    if not (isinstance(node, ast.ClassDef) and node.name == cls):
+      continue
+    for stmt in node.body:
+      targets = stmt.targets if isinstance(stmt, ast.Assign) else ([stmt.target] if isinstance(stmt, ast.AnnAssign) else [])
+      for target in targets:
+        if isinstance(target, ast.Name) and target.id == name:
+          return ast.literal_eval(stmt.value)
+    pytest.fail(f"{rel}: class {cls} に {name} が無い。追従で載り漏れた疑い")
+  pytest.fail(f"{rel}: class {cls} が無い")
+
+
+def test_pln1_8_e2e_path_floor_survives():
+  """PLN-1_8 (08-29): e2e の action ヘッドが -2.67 で飽和する壁を、同じモデルの経路 min で補う。
+
+  ⚠ 一律オフセット/スケールは却下済み (誤発火し床は門にならない)。門 `action < -2.0` と床 -3.0 の組。
+  根拠 = memory longitudinal_tune「08-29」。
+  """
+  assert _literal(LONG_PLANNER_PY, 'E2E_ACCEL_PATH_GATE') == -2.0
+  assert _literal(LONG_PLANNER_PY, 'E2E_ACCEL_PATH_FLOOR') == -3.0
+  assert _literal(LONG_PLANNER_PY, 'E2E_ACCEL_PATH_N') == 9
+  assert _literal(LONG_PLANNER_PY, 'E2E_ACCEL_PATH_RC') == 0.15
+  assert re.search(r'max\s*\(\s*min\s*\(\s*output_a_target_e2e\s*,.*E2E_ACCEL_PATH_FLOOR\s*\)', _read(LONG_PLANNER_PY)), \
+    '経路 min を e2e 目標に当てる行が無い = 定数だけ載って補強が効いていない'
+
+
+def test_carstate_gs_set_speed_and_precollision_timeout_survive():
+  """carstate の GS 分岐 2 つ。
+
+  ① set 速度 = メーター読みに合わせる逆変換 (1.029v + 2.5km/h、07-12 高速実測で再較正)。
+     落ちると「set 100 で実速 100」になり純正より速く走る。
+  ② smartDSU の PRE_COLLISION (0x283) は active 32Hz / idle 2Hz で切替送信するので
+     timeout を 1.0s に固定 (freq=10)。落ちると起動直後に canError 0x283 が再発する。
+  """
+  src = _read(CARSTATE_PY)
+  assert re.search(r'ret\.cruiseState\.speed\s*=\s*\(ret\.cruiseState\.speed\s*-\s*2\.5\s*\*\s*CV\.KPH_TO_MS\)\s*/\s*1\.029', src), \
+    'GS の set 速度逆変換 (÷1.029, -2.5km/h) が落ちている'
+  assert re.search(r'ret\.cruiseState\.speedCluster\s*=\s*ret\.cruiseState\.speed', src), \
+    'speedCluster を DSU_CRUISE 由来の値に鏡写しする行が落ちている'
+  assert re.search(r'LEXUS_GS_F.*SMART_DSU[\s\S]{0,200}\(\s*"PRE_COLLISION"\s*,\s*10\s*\)', src), \
+    'PRE_COLLISION の timeout 固定 (freq=10) が落ちている = canError 0x283 が再発する'
+
+
+def test_speed_too_high_debounce_survives():
+  """speedTooHigh の 0.5s デバウンス。vEgo の瞬間スパイクで解除されるのを防ぐ。"""
+  src = _read(CAR_EVENTS_PY)
+  assert 'speed_too_high_cnt' in src, 'デバウンス用カウンタが落ちている'
+  assert re.search(r'speed_too_high_cnt\s*>=\s*int\s*\(\s*0\.5\s*/\s*DT_CTRL\s*\)', src), \
+    'デバウンス幅 0.5s が落ちている (上流の即時判定に戻っている)'
+
+
+def test_selfdrived_big_model_warmup_gate_survives():
+  """08-29/09-01: big model ロード完了後の warmup 窓で engage できてしまう穴と、Ready 音の位置。
+
+  ⚠ upstream はロード中しか NO_ENTRY を出さず、warmup の数秒は安全チェックだけが死んでいる
+  (08-29 に 125km/h で engage でき op_tq -1147)。GS は ①窓の間も NO_ENTRY ②免除は非 engage 時のみ
+  ③Ready 音は窓が閉じてから。
+  """
+  src = _read(SELFDRIVED_PY)
+  assert _literal(SELFDRIVED_PY, 'BIG_MODEL_WARMUP') == 5.0
+  assert 'warmup_sec = 5.' not in src, 'upstream のローカル定数に戻っている = GS の窓が消えた'
+  assert re.search(r'big_model_settling\s*=\s*settling_window\s+and\s+not\s+self\.enabled', src), \
+    '安全チェック免除が engage 中にも効いてしまう (not self.enabled が落ちた)'
+  assert re.search(r'warming_up\s*=\s*self\.big_model_loading\s+or\s+time\.monotonic\(\)\s*<\s*self\.big_model_ready_t\s*\+\s*BIG_MODEL_WARMUP', src), \
+    'warmup 窓の NO_ENTRY (bigModelLoading の延長) が落ちている'
+  # Ready 音: ロード完了の瞬間 (upstream) ではなく、announced フラグ付きの elif で鳴らす
+  ready_after_window = (r'elif self\.big_model_ready_t and not self\.big_model_announced:\s*\n' +
+                        r'(?:\s*#.*\n)*\s*self\.events_sp\.add\(custom\.OnroadEventSP\.EventName\.bigModelReady\)')
+  assert re.search(ready_after_window, src), 'Ready 音が warmup 窓の前に戻っている (「Ready と言われたのに準備中」が再発する)'
+  assert not re.search(r'self\.big_model_ready_t = time\.monotonic\(\)\s*\n\s*self\.events_sp\.add\(.*bigModelReady', src), \
+    'upstream の「ロード完了と同時に Ready」が残っている'
+
+
+def test_modeld_restart_on_crash_survives():
+  """08-29/08-30: chestnut の GPU ハングで modeld が落ちたら manager が再起動する (big のまま復帰)。
+
+  ⚠⚠ 回数で諦めてはいけない — 08-30 実車: 30-60s 間隔は 10 連続 `no pcie`、4 分 28 秒空けた 1 回で復帰。
+  効くのは待ち時間なので、倍々 backoff + 上限 300s + 「生きられたら忘れる」の 3 点セット。
+  """
+  cfg = _read(PROCESS_CONFIG_PY)
+  assert re.search(r'NativeProcess\("modeld_tinygrad".*restart_on_crash=True', cfg), \
+    'modeld_tinygrad に restart_on_crash=True が付いていない = ハング後 1 走行まるごと無モデル'
+  assert _class_literal(PROCESS_PY, 'ManagerProcess', 'RESTART_BACKOFF') == 10.0
+  assert _class_literal(PROCESS_PY, 'ManagerProcess', 'RESTART_BACKOFF_MAX') == 300.0
+  assert _class_literal(PROCESS_PY, 'ManagerProcess', 'CRASH_FORGET') == 300.0
+  src = _read(PROCESS_PY)
+  assert re.search(r'def reap_if_crashed\(self\)', src), 'reap_if_crashed が落ちている'
+  assert re.search(r'\n\s+self\.reap_if_crashed\(\)\s*\n\s+if self\.proc is not None:', src), \
+    'NativeProcess.start() が reap_if_crashed を呼んでいない = 定義だけ残って再起動しない'
+  assert re.search(r'RESTART_BACKOFF\s*\*\s*\(\s*2\s*\*\*\s*self\.crash_count\s*\)', src), '倍々 backoff が落ちている'
+  assert re.search(r'now - self\.last_start_t > self\.CRASH_FORGET', src), \
+    '忘却の基準が「生きられた時間」でなくなっている (最後のクラッシュ基準だと待ちが伸びない)'
+
+
+def test_modeld_keeps_raise_and_restart_instead_of_small_fallback():
+  """09-01 user 判断: 上流の「big 失敗 → small へ降格して走り続ける」は採らない。
+
+  big と small の実力差が大きい。ロード失敗 = snapshot + reset_chestnut + **raise** → manager が
+  再起動 (上のテスト) で big のまま復帰する。⚠ 追従で上流の降格経路が戻ると raise しないので気付けない劣化。
+  """
+  src = _read(MODELD_PY)
+  assert re.search(r'raise RuntimeError\(f"eGPU model load failed', src), \
+    'ロード失敗で raise していない = 上流の small 降格に戻っている (黙って small で走る)'
+  assert 'fall back to small' not in src, '上流の「走行中に small へ降格」が残っている'
+  assert 'ChestnutModelError' not in src, '上流 (master 09-01) の降格経路が入っている = 路線が変わった。user 判断が要る'
+  for name in ('reset_chestnut', 'save_dmesg_snapshot', 'capture_stdio', 'save_stdio_snapshot'):
+    assert re.search(rf'\b{name}\(', src), f'modeld.py が {name}() を呼んでいない (診断/復帰の経路が落ちた)'
+  assert re.search(r'def _load_with_retry\(', src) and re.search(r'_load_with_retry\(make_big\)', src), \
+    '_load_with_retry が定義されていない、または big のロードに使われていない'
+
+
+GS_MODELD_HELPERS = [
+  'chestnut_device_path', 'reset_chestnut', 'save_dmesg_snapshot', 'capture_stdio', 'save_stdio_snapshot',
+  'USBDEVFS_RESET', 'GPU_FAULT_MARKERS', 'CRASH_DIR',
+]
+
+
+@pytest.mark.parametrize('name', GS_MODELD_HELPERS)
+def test_gs_modeld_helper_survives(name):
+  """helpers.py の GS 追加分。⚠ 上流 master (09-01) が同じファイルの import 行を書き換えたので次の追従で実競合する。"""
+  assert name in _toplevel_names(MODELD_HELPERS_PY), f'{MODELD_HELPERS_PY} から {name} が消えた'
+
+
+def test_tinygrad_flock_self_contention_fix_survives():
+  """08-31/09-01: chestnut ハング後の再ロードが「自分の持つ flock」で永久に EBUSY になる自家中毒 (決着 11286f3991)。
+
+  同じプロセスからの再取得は既存 fd を返し、失敗時は fd を閉じる。⚠ tinygrad 総入れ替え (09-02 上流) で
+  上流の system.py は flock に触れていない = 吸収されていないので維持が要る。
+  """
+  src = _read(TG_SYSTEM_PY)
+  assert re.search(r'def _held_locks\(self\)', src), '_held_locks が落ちている'
+  assert re.search(r'if \(cached:=self\._held_locks\.get\(name\)\) is not None: return cached', src), \
+    '同一プロセスからの再取得が既存 fd を返していない (自家中毒が再発する)'
+  assert re.search(r'except OSError:\s*\n\s*os\.close\(fd\)', src), '取得失敗時に fd を閉じていない (leak して次回も衝突)'
+  assert re.search(r'self\._held_locks\[name\] = self\.lock_fd = fd', src), '取得した fd を記録していない'
+
+
+def test_tinygrad_usb_reload_v3_survives():
+  """09-01/09-02: eGPU 再ロード時の EBUSY 対策 (claim 手放し + v3 の raw release + 診断ログ)。
+
+  ① libusb の detach/reset が自分で claim した iface 0 を set_configuration の前に release する (09-01)
+  ② v3: raw ioctl で release し、前後の所有 fd/driver を `[usb-v3]` で stderr に残す (09-02)。
+  ⚠ 判定材料 (次のハングでの `[usb-v3]` ログ) がまだ出ていない = 消すな。順序も見る。
+  """
+  src = _read(TG_USB_PY)
+  assert _literal(TG_USB_PY, '_USBDEVFS_RELEASEINTF') == 0x80045510
+  assert _literal(TG_USB_PY, '_USBDEVFS_GETDRIVER') == 0x41045508
+  for name in ('_gs_devnode', '_gs_own_fds', '_gs_getdriver', '_gs_log', '_gs_raw_release'):
+    assert name in _toplevel_names(TG_USB_PY), f'{name} が落ちている'
+  i_reset = src.find('libusb_reset_device)(self.handle)')
+  i_release = src.find('libusb.libusb_release_interface(self.handle, 0)')
+  i_raw = src.find('_gs_raw_release(self.handle, 0)')
+  i_setcfg = src.find('libusb_set_configuration)(self.handle, 1)')
+  assert -1 not in (i_reset, i_release, i_raw, i_setcfg), f'呼び出しが見つからない: {(i_reset, i_release, i_raw, i_setcfg)}'
+  assert i_reset < i_release < i_raw < i_setcfg, \
+    'reset_device → release_interface → _gs_raw_release → set_configuration の順が崩れている'
+
+
+def test_pln1_3_map_fix_freshness_stamp_survives():
+  """PLN-1_3 (08-08): localizer が invalid の間も last fix を書き続けるので、鮮度と有効性を印して消費側が拒否できるようにする。
+
+  ⚠ `unixMillis` は壁時計が要点 (消費側が自分の now() と比べる) — ruff TID251 除外は意図的 (585a54daeb)。
+  """
+  src = _read(OSM_MAP_DATA_PY)
+  assert re.search(r'"valid":\s*bool\(self\.localizer_valid\)', src), 'valid 印が落ちている'
+  assert re.search(r'"unixMillis":\s*int\(time\.time\(\)\s*\*\s*1e3\)', src), 'unixMillis 印が落ちている (壁時計で押すこと)'
+  assert re.search(r'data\.get\("unixMillis"\)', _read(SCC_MAP_PY)), \
+    'SCC-M 側が unixMillis を読んでいない = 印だけあって鮮度判定が効かない'
+
+
+def test_rl_model_output_parsing_survives():
+  """deep_rl3+ (RL 系モデル) の出力形。action ヘッドから曲率を取る経路と、plan/lead の単一/MHP 自動判定。
+
+  ⚠ 現行の素 16D では通らない経路だが、custom モデルを試すとき無いと parse で落ちる (deeprl_sunnypilot_port)。
+  """
+  assert re.search(r'if \(action := output\.get\(\'action\'\)\) is not None:\s*.*\n\s*return float\(action\[0, 0\]\) / \(max\(1\.0, vego\)\) \*\* 2',
+                   _read(FILL_MODEL_MSG_PY)), 'action ヘッド → 曲率の経路が落ちている'
+  src = _read(PARSE_OUTPUTS_PY)
+  assert re.search(r'def is_mhp\(self, outs, name, shape\)', src), 'is_mhp が落ちている'
+  assert re.search(r'outs\[name\]\.shape\[1\] == 2 \* shape', src), 'MHP 判定 (2*shape で単一) が落ちている'
+
+
+def test_mici_update_hash_first_survives():
+  """更新ボタンの表示 = hash を先頭に (version/branch は滅多に変わらず、更新の区別は hash)。
+
+  ⚠ 上流 master (09-01) が software.py と button.py の同じ行を触っている = 次の追従で実競合する。
+  """
+  assert re.search(r'value = f"\{desc\[2\]\} - \{desc\[0\]\} \(\{desc\[1\]\}\)"', _read(MICI_SOFTWARE_PY)), \
+    'install update の表示が upstream (version 先頭) に戻っている'
+  assert re.search(r'InstallUpdateButton[\s\S]{0,400}scroll_value=True', _read(MICI_SOFTWARE_PY)), \
+    'InstallUpdateButton が scroll_value=True を渡していない'
+  src = _read(MICI_BUTTON_PY)
+  assert re.search(r'def __init__\(self, text: str, value: str = "", icon: .*scroll: bool = False,\s*\n\s*scroll_value: bool \| None = None\)', src), \
+    'BigButton.__init__ の scroll_value 引数が落ちている (software.py 側が TypeError で落ちる)'
+  assert re.search(r'if self\._scroll or self\._scroll_value:', src), 'value 行のスクロール背景が落ちている'
