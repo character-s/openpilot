@@ -122,16 +122,13 @@ class CarInterface(CarInterfaceBase):
     # LEXUS_GS_F (TSS-P) stop tuning: apply TSS2 stopping params so approach-to-stop is
     # smooth instead of the coarse default (creep past line, then late hard brake). 2026-07-12
     if candidate == CAR.LEXUS_GS_F:
-      # NOTE: vEgoStopping is dead — nothing reads it anymore (stop decision moved to
-      # should_stop() in selfdrive/controls/lib/drive_helpers.py, hardcoded there as PLN-1_5).
-      # vEgoStarting / stoppingDecelRate ARE still read via CP.deprecated in longcontrol.py.
-      ret.deprecated.vEgoStopping = 0.4
+      # vEgoStarting / stoppingDecelRate are read via CP.deprecated in longcontrol.py
+      # (the stop threshold itself lives in drive_helpers.should_stop = PLN-1_5)
       ret.deprecated.vEgoStarting = 0.25
       ret.deprecated.stoppingDecelRate = 0.2
       ret.longitudinalActuatorDelay = 0.05  # hybrid quick response
 
-
-    if ret.flags & ToyotaFlags.TSS2:  # upstream moved from TSS2_CAR set to flags
+    if ret.flags & ToyotaFlags.TSS2:
       ret.flags |= ToyotaFlags.RAISED_ACCEL_LIMIT.value
 
       # Hybrids have much quicker longitudinal actuator response

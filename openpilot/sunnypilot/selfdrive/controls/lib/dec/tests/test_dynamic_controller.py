@@ -81,12 +81,9 @@ class TestDynamicExperimentalController(OpenpilotTestCase):
     assert controller.mode() == "blended"
 
   def test_lead_with_slowdown_prefers_blended(self, mock_cp, mock_mpc, default_sm):
-    """GS 450h reorder: a lead is present AND we need to slow down -> blended (e2e).
-
-    With the upstream order "lead detected -> acc" returns first, so the moment
-    radar acquires a target the planner drops e2e and loses the model's visual
-    look-ahead braking. Measured on route 015 (51 lead-decel scenes): upstream
-    order picked blended 0.2% of frames, this order 65.4%.
+    """GS 450h reorder: lead present AND slow down needed -> blended (e2e), so the model's visual
+    look-ahead braking survives radar acquiring a target. Numbers (route 015) + rationale:
+    openpilot/sunnypilot/tests/test_gs450h_customizations.py::test_dec_radar_mode_checks_slow_down_before_lead
     """
     controller = DynamicExperimentalController(mock_cp, mock_mpc, params=MockParams())
     controller._lead_filter = FakeKalman(value=1.0)       # ty: ignore[invalid-assignment]

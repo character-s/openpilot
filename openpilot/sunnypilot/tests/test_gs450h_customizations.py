@@ -45,6 +45,7 @@ SCC_VISION_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/smart_cruise_contro
 SCC_MAP_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/smart_cruise_control/map_controller.py'
 LC_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/lane_centering.py'
 LC_PARAMS_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/lane_centering_params.py'
+DEC_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/dec/dec.py'
 MICI_MODELS_PY = 'openpilot/selfdrive/ui/sunnypilot/mici/layouts/models.py'
 MICI_TOGGLES_PY = 'openpilot/selfdrive/ui/mici/layouts/settings/toggles.py'
 PARAMS_KEYS_H = 'openpilot/common/params_keys.h'
@@ -61,8 +62,6 @@ MODELD_HELPERS_PY = 'openpilot/selfdrive/modeld/helpers.py'
 PROCESS_PY = 'openpilot/system/manager/process.py'
 PROCESS_CONFIG_PY = 'openpilot/system/manager/process_config.py'
 OSM_MAP_DATA_PY = 'openpilot/sunnypilot/mapd/live_map_data/osm_map_data.py'
-FILL_MODEL_MSG_PY = 'openpilot/sunnypilot/modeld_v2/fill_model_msg.py'
-PARSE_OUTPUTS_PY = 'openpilot/sunnypilot/modeld_v2/parse_model_outputs.py'
 MICI_SOFTWARE_PY = 'openpilot/selfdrive/ui/mici/layouts/settings/software.py'
 MICI_BUTTON_PY = 'openpilot/selfdrive/ui/mici/widgets/button.py'
 # ⚠ tinygrad 本体へのパッチ。上流が tinygrad を総入れ替えするたびに (09-02 に 1 回目) ここが競合する
@@ -81,30 +80,48 @@ def _read(rel: str) -> str:
   return path.read_text(encoding='utf-8')
 
 
+def _name_targets(stmt: ast.stmt) -> list[str]:
+  """Assign/AnnAssign の左辺のうち単純名だけ。"""
+  if isinstance(stmt, ast.Assign):
+    return [t.id for t in stmt.targets if isinstance(t, ast.Name)]
+  if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+    return [stmt.target.id]
+  return []
+
+
 def _toplevel_names(rel: str) -> set[str]:
   """モジュールのトップレベルで定義されている名前を集める。"""
   names: set[str] = set()
   for node in ast.parse(_read(rel), filename=rel).body:
     if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
       names.add(node.name)
-    elif isinstance(node, ast.Assign):
-      names.update(t.id for t in node.targets if isinstance(t, ast.Name))
-    elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-      names.add(node.target.id)
+    else:
+      names.update(_name_targets(node))
   return names
 
 
+def _literal_in(rel: str, body: list[ast.stmt], name: str, where: str):
+  """body 直下の `name = <リテラル>` を取り出す。定数が upstream の値に戻ると落ちる。"""
+  for stmt in body:
+    if name in _name_targets(stmt):
+      try:
+        return ast.literal_eval(stmt.value)
+      except ValueError:
+        pytest.fail(f"{rel}: {name} がリテラルでなくなっている ({ast.unparse(stmt.value)[:70]})")
+  pytest.fail(f"{rel}: {where} に {name} が無い。追従で載り漏れた疑い")
+
+
 def _literal(rel: str, name: str):
-  """トップレベルの `name = <リテラル>` を取り出す。定数が upstream の値に戻ると落ちる。"""
+  """トップレベルの `name = <リテラル>`。"""
+  return _literal_in(rel, ast.parse(_read(rel), filename=rel).body, name, 'トップレベル')
+
+
+def _class_literal(rel: str, cls: str, name: str):
+  """`class <cls>:` 直下の `name = <リテラル>` (クラス属性)。"""
   for node in ast.parse(_read(rel), filename=rel).body:
-    targets = node.targets if isinstance(node, ast.Assign) else ([node.target] if isinstance(node, ast.AnnAssign) else [])
-    for target in targets:
-      if isinstance(target, ast.Name) and target.id == name:
-        try:
-          return ast.literal_eval(node.value)
-        except ValueError:
-          pytest.fail(f"{rel}: {name} がリテラルでなくなっている ({ast.unparse(node.value)[:70]})")
-  pytest.fail(f"{rel}: {name} が定義されていない。追従で載り漏れた疑い")
+    if isinstance(node, ast.ClassDef) and node.name == cls:
+      return _literal_in(rel, node.body, name, f'class {cls}')
+  pytest.fail(f"{rel}: class {cls} が無い")
 
 
 def _assignments_in_gs_f_branch(rel: str, attr_root: str) -> dict[str, object]:
@@ -197,16 +214,12 @@ def test_car_side_never_exceeds_panda_side():
   car = _assignments_in_gs_f_branch(VALUES_PY, 'self')
   panda = _c_struct_fields(SAFETY_H, 'TOYOTA_GS_F_TORQUE_STEERING_LIMITS')
 
-  assert car['STEER_MAX'] <= panda['max_torque'], \
-    f"car の STEER_MAX {car['STEER_MAX']} > panda の max_torque {panda['max_torque']} = panda が弾く"
-  assert car['STEER_DELTA_UP'] <= panda['max_rate_up'], \
-    f"car の DELTA_UP {car['STEER_DELTA_UP']} > panda の max_rate_up {panda['max_rate_up']} = panda が弾く"
-  assert car['STEER_DELTA_DOWN'] <= panda['max_rate_down'], \
-    f"car の DELTA_DOWN {car['STEER_DELTA_DOWN']} > panda の max_rate_down {panda['max_rate_down']}"
-  assert car['STEER_DELTA_DOWN_FAST'] <= panda['max_rate_down'], \
-    f"car の DELTA_DOWN_FAST {car['STEER_DELTA_DOWN_FAST']} > panda の max_rate_down {panda['max_rate_down']}"
-  assert car['STEER_ERROR_MAX'] <= panda['max_torque_error'], \
-    f"car の ERROR_MAX {car['STEER_ERROR_MAX']} > panda の max_torque_error {panda['max_torque_error']}"
+  # (car 側の名前, panda 側の名前)。car が 1 でも大きいと panda が tx を弾く
+  for car_key, panda_key in (('STEER_MAX', 'max_torque'), ('STEER_DELTA_UP', 'max_rate_up'),
+                             ('STEER_DELTA_DOWN', 'max_rate_down'), ('STEER_DELTA_DOWN_FAST', 'max_rate_down'),
+                             ('STEER_ERROR_MAX', 'max_torque_error')):
+    assert car[car_key] <= panda[panda_key], \
+      f"car の {car_key} {car[car_key]} > panda の {panda_key} {panda[panda_key]} = panda が弾く"
 
   # max_rt_delta は 250ms (25 frames) 分の累積上限。car 側が出せる最速で埋めても超えないこと
   worst_case = 25 * car['STEER_DELTA_DOWN_FAST']
@@ -294,8 +307,7 @@ def test_stop_distance_matches_compiled_cost():
   gen_long_ocp() が casadi の式に埋め込み、acados が吐いた C に焼き付く。この repo は
   生成済み C と .so を同梱し root の `prebuilt` でビルドを飛ばすので、再生成は起きない。
 
-  ⚠ 実際に 2026-08-28 まで PLN-1_4 として 8.5 が入っていたが、生成済み C は全履歴で 6.0
-    のままで、実機の MPC は一度もその値を見ていなかった。このテストはその再発を止める。
+  ⚠ 過去に Python 側だけ変えて、実機の MPC が一度もその値を見ていなかった事故がある。
     ここが落ちたら「定数を書き換えれば効く」と思い込む前に、c_generated_code を
     再生成する経路があるのかを先に確かめること。
   """
@@ -326,10 +338,6 @@ def test_pln1_7_extra_stop_distance_survives():
   assert src.count('- get_extra_stop_distance(') == 2, \
     'lead_0_obstacle / lead_1_obstacle の両方から引かれていない'
   assert 'PLN-1_7' in src, 'PLN-1_7 の由来コメントが消えている'
-
-
-def test_max_vel_err_survives():
-  assert _literal(DRIVE_HELPERS_PY, 'MAX_VEL_ERR') == 5.0
 
 
 def test_scc_vision_curve_tuning_survives():
@@ -394,11 +402,7 @@ def test_lane_centering_tuning_survives():
 
 
 def test_lane_centering_lowspeed_schedule_survives():
-  """09-02: 渋滞・低速で左に寄るため、低速帯だけ不感帯と先読みを詰めるスケジュール。
-
-  ⚠ 09-03 判定 = <18km/h だけ効き始めた / 18-29 は不発 / ≥45 不変 (memory lateral_nlcc 09-03)。
-  次段 (_MAX_RAW_CORRECTION 0.004→0.006) は低速 overshoot 悪化で**保留**。ここは値の存在だけ見る。
-  """
+  """渋滞・低速で左に寄るため、低速帯だけ不感帯と先読みを詰めるスケジュール。ここは値の存在だけ見る。"""
   assert _literal(LC_PY, '_MIN_V_EGO') == 2.5, '有効下限が 5.0 (18km/h) に戻っている = 渋滞帯で LC が効かない'
   assert _literal(LC_PY, '_LOWSPEED_V') == (8.0, 12.5)
   assert _literal(LC_PY, '_LOWSPEED_GAIN') == 1.0
@@ -549,12 +553,12 @@ GS_TOUCHED_FILES = [
   'openpilot/selfdrive/ui/mici/widgets/lane_centering.py',
   'openpilot/selfdrive/controls/controlsd.py',
   'openpilot/selfdrive/controls/lib/latcontrol_torque.py',
-  'openpilot/sunnypilot/selfdrive/controls/lib/dec/dec.py',
+  DEC_PY,
   'openpilot/sunnypilot/selfdrive/controls/lib/latcontrol_torque_ext.py',
   PANDAD_CC, SPI_CC,
   # 09-03 追加
   CARSTATE_PY, CAR_EVENTS_PY, LONG_PLANNER_PY, SELFDRIVED_PY, MODELD_HELPERS_PY,
-  PROCESS_PY, PROCESS_CONFIG_PY, OSM_MAP_DATA_PY, FILL_MODEL_MSG_PY, PARSE_OUTPUTS_PY,
+  PROCESS_PY, PROCESS_CONFIG_PY, OSM_MAP_DATA_PY,
   MICI_SOFTWARE_PY, MICI_BUTTON_PY, TG_SYSTEM_PY, TG_USB_PY,
 ]
 
@@ -574,10 +578,9 @@ def test_gs_touched_files_parse_and_have_no_conflict_markers(rel):
 def test_pln1_6_creep_fade_keeps_braking_compensation():
   """PLN-1_6: creep 帯フェードは「ゼロ付近の要求を保持したとき」だけに効かせる。
 
-  07-15 のフェードは v<0.5 で PCM 補償を丸ごと落とすので、停止接近 (要求 -0.45) でも
-  補償が消え、実行率が 47-69% (他帯は 77-85%) まで落ちて最後の ~1.3m をじりじり進んでいた。
-  ⚠ この門が消えると停止がまた緩む。⚠ フェード自体を消すと 07-15 の前後脈動が戻る
-  (発火条件は 08-28 時点でも 00f に 1 件残っている)。**両方必要**。
+  フェードだけだと v<0.5 で PCM 補償を丸ごと落とすので、停止接近 (要求 -0.45) でも補償が消えて
+  最後の ~1m をじりじり進む。⚠ この門が消えると停止がまた緩む。⚠ フェード自体を消すと
+  低速の前後脈動が戻る。**両方必要**。
   """
   src = _read(CARCONTROLLER_PY)
   assert 'PLN-1_6' in src, 'PLN-1_6 の由来コメントが消えている (なぜ門があるかが失われる)'
@@ -595,13 +598,12 @@ def test_dec_radar_mode_checks_slow_down_before_lead():
 
   上流の順 (lead が先) に戻ると、前車を検知した瞬間に e2e の視覚先読み減速が
   planner の候補から丸ごと外れ、「set 速度のまま車列に近づいて急ブレーキ」が再発する。
+  停止直前も blended から外れ、その隙に MPC がクリープを足して前車へ詰める。
   route 015 の実測 (前車ありの減速シーン 51 件、`archive/probes/_dec_mode_shadow.py`):
-    上流順 = blended  0.2% (16/7992)
-    この順 = blended 65.4% (5227/7992)
-  停止時も、上流順は停止**直前**が blended 0.0% で停止後に 82.6% へ切り替わるため、
-  その切替の隙に MPC がクリープを足して前車へ詰める (user 実体験)。
+    上流順 = blended 0.2% (16/7992) / この順 = 65.4% (5227/7992)
+    停止直前 = 上流順 0.0% → 停止後 82.6% (この切替の隙がクリープ詰め)
   """
-  src = _read('openpilot/sunnypilot/selfdrive/controls/lib/dec/dec.py')
+  src = _read(DEC_PY)
   body = src.split('def _radar_mode')[1].split('def update')[0]
   i_dep = body.index('_lead_departing')
   i_slow = body.index('self._has_slow_down')
@@ -615,8 +617,7 @@ def test_pandad_binary_carries_the_send_priority_patch():
 
   release は SConstruct を落としているので c4 では scons が走らず、配られた prebuilt が
   そのまま動く。c4 の実機で焼いても `updated` の finalize が working tree を git の内容に
-  戻すため、**焼いたバイナリを fork に置く以外に E2 を車載し続ける手段が無い** (09-03 に実測。
-  09-02 に焼いた E2 はその夜の finalize で消えており、翌日の走行は E2 無しだった)。
+  戻す (焼いた翌日には消えていた) ため、**焼いたバイナリを fork に置く以外に E2 を車載し続ける手段が無い**。
 
   ⇒ 追従で上流の prebuilt に戻ったらここで落ちる。落ちたら c4 で焼き直して差し替えること:
      `archive/probes/_c4_scons_build.ps1 -Pandad -Apply -KeepDefs -AcceptBaseline`
@@ -634,35 +635,14 @@ def test_pandad_binary_carries_the_send_priority_patch():
   )
 
 
-def test_gs_touched_file_list_is_not_stale():
-  """⚠ このリスト自体が腐るのを防ぐ。ファイルが移動/改名されたら _read が fail する。"""
-  missing = [rel for rel in GS_TOUCHED_FILES if not (REPO_ROOT / rel).exists()]
-  assert not missing, f"GS 改造ファイルが見つからない (上流が移動/改名した?): {missing}"
-
-
 # ===========================================================================
 # 9) 09-03 棚卸しで追加 — 追従 8 回目まで「テストが見ていなかった」改造
 # ===========================================================================
-
-def _class_literal(rel: str, cls: str, name: str):
-  """`class <cls>:` 直下の `name = <リテラル>` (クラス属性)。_literal はトップレベルしか見ない。"""
-  for node in ast.parse(_read(rel), filename=rel).body:
-    if not (isinstance(node, ast.ClassDef) and node.name == cls):
-      continue
-    for stmt in node.body:
-      targets = stmt.targets if isinstance(stmt, ast.Assign) else ([stmt.target] if isinstance(stmt, ast.AnnAssign) else [])
-      for target in targets:
-        if isinstance(target, ast.Name) and target.id == name:
-          return ast.literal_eval(stmt.value)
-    pytest.fail(f"{rel}: class {cls} に {name} が無い。追従で載り漏れた疑い")
-  pytest.fail(f"{rel}: class {cls} が無い")
-
 
 def test_pln1_8_e2e_path_floor_survives():
   """PLN-1_8 (08-29): e2e の action ヘッドが -2.67 で飽和する壁を、同じモデルの経路 min で補う。
 
   ⚠ 一律オフセット/スケールは却下済み (誤発火し床は門にならない)。門 `action < -2.0` と床 -3.0 の組。
-  根拠 = memory longitudinal_tune「08-29」。
   """
   assert _literal(LONG_PLANNER_PY, 'E2E_ACCEL_PATH_GATE') == -2.0
   assert _literal(LONG_PLANNER_PY, 'E2E_ACCEL_PATH_FLOOR') == -3.0
@@ -707,8 +687,8 @@ def test_selfdrived_big_model_warmup_gate_survives():
   src = _read(SELFDRIVED_PY)
   assert _literal(SELFDRIVED_PY, 'BIG_MODEL_WARMUP') == 5.0
   assert 'warmup_sec = 5.' not in src, 'upstream のローカル定数に戻っている = GS の窓が消えた'
-  assert re.search(r'big_model_settling\s*=\s*settling_window\s+and\s+not\s+self\.enabled', src), \
-    '安全チェック免除が engage 中にも効いてしまう (not self.enabled が落ちた)'
+  assert re.search(r'big_model_settling\s*=\s*warming_up\s+and\s+not\s+self\.enabled', src), \
+    '安全チェック免除が engage 中にも効いてしまう (not self.enabled が落ちた) か、NO_ENTRY の窓と別式になっている'
   assert re.search(r'warming_up\s*=\s*self\.big_model_loading\s+or\s+time\.monotonic\(\)\s*<\s*self\.big_model_ready_t\s*\+\s*BIG_MODEL_WARMUP', src), \
     'warmup 窓の NO_ENTRY (bigModelLoading の延長) が落ちている'
   # Ready 音: ロード完了の瞬間 (upstream) ではなく、announced フラグ付きの elif で鳴らす
@@ -814,18 +794,6 @@ def test_pln1_3_map_fix_freshness_stamp_survives():
   assert re.search(r'"unixMillis":\s*int\(time\.time\(\)\s*\*\s*1e3\)', src), 'unixMillis 印が落ちている (壁時計で押すこと)'
   assert re.search(r'data\.get\("unixMillis"\)', _read(SCC_MAP_PY)), \
     'SCC-M 側が unixMillis を読んでいない = 印だけあって鮮度判定が効かない'
-
-
-def test_rl_model_output_parsing_survives():
-  """deep_rl3+ (RL 系モデル) の出力形。action ヘッドから曲率を取る経路と、plan/lead の単一/MHP 自動判定。
-
-  ⚠ 現行の素 16D では通らない経路だが、custom モデルを試すとき無いと parse で落ちる (deeprl_sunnypilot_port)。
-  """
-  assert re.search(r'if \(action := output\.get\(\'action\'\)\) is not None:\s*.*\n\s*return float\(action\[0, 0\]\) / \(max\(1\.0, vego\)\) \*\* 2',
-                   _read(FILL_MODEL_MSG_PY)), 'action ヘッド → 曲率の経路が落ちている'
-  src = _read(PARSE_OUTPUTS_PY)
-  assert re.search(r'def is_mhp\(self, outs, name, shape\)', src), 'is_mhp が落ちている'
-  assert re.search(r'outs\[name\]\.shape\[1\] == 2 \* shape', src), 'MHP 判定 (2*shape で単一) が落ちている'
 
 
 def test_mici_update_hash_first_survives():

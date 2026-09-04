@@ -83,20 +83,11 @@ class ManagerProcess(ABC):
   def reap_if_crashed(self) -> None:
     """GS450h: クラッシュ済みのプロセスを掃除して start() が再起動できるようにする。
 
-    ⚠ upstream は proc が残っている限り start() を no-op にするので、落ちたプロセスは
-    走行が終わるまで復活しない。modeld_tinygrad は chestnut の GPU ハング
-    (tinygrad hcq "Wait timeout: 3000 ms!") で落ちるため、**1 走行まるごと無モデル**になる。
-    08-29 実測: modelV2 が 0 件のまま engage でき、op_tq -1147 で右へ持って行かれた。
-    プロセスを殺し直すと am_usb の flock も tinygrad の状態も消えるので、
-    再起動すれば big model のまま復帰できる (小モデルへの降格が不要)。
-
-    ⚠⚠ **回数で諦めてはいけない**。08-30 実車で確認: GPU ハング後の再ロードは
-    30-60 秒間隔だと **10 回連続で `no pcie` に終わり**、**4 分 28 秒空けた 1 回**で
-    復帰した (08:32:22 ハング -> 08:55:03 `models loaded in 37.5s`、無モデル 18 分)。
-    失敗した試行と成功した試行の違いは **間隔だけ**で、USBDEVFS_RESET を打った直後に
-    掴みに行くと PCIe の再確立が終わっておらず `no pcie` + `am_usb lock` で必ず落ちる。
-    ⇒ 5 回で打ち切る設計だとこの復帰を永久に取り逃す。効くのは回数制限ではなく
-    **待ち時間**なので、クラッシュのたびに倍にして RESTART_BACKOFF_MAX で頭打ちにする。
+    upstream は proc が残っている限り start() を no-op にするので、chestnut の GPU ハングで
+    modeld_tinygrad が落ちると 1 走行まるごと無モデルになる。プロセス再起動で am_usb の flock も
+    tinygrad の状態も消えるので、small へ降格せず big のまま復帰できる。
+    ⚠⚠ 回数で諦めない。効くのは待ち時間 (短い間隔の再試行は PCIe 再確立が終わる前に掴んで必ず `no pcie`、
+    数分空けた 1 回で復帰する) ⇒ クラッシュのたびに倍にして RESTART_BACKOFF_MAX で頭打ちにする。
     """
     if not self.restart_on_crash or self.proc is None or self.shutting_down:
       return

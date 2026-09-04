@@ -211,9 +211,8 @@ class DynamicExperimentalController:
     self._v_cruise_kph = car_state.vCruise
     self._has_standstill = car_state.standstill
 
-    # launch fix: lead pulling away while we hold standstill (e.g. green-light queue departure)
-    # v3: vLead threshold 1.0 -> 0.5 — slow creeping departures (vLead<1.0 for 3.5s
-    # in cf/seg77) kept the fix from firing; dRel<20 gate still rejects cross traffic
+    # launch fix: lead pulling away from a standstill queue. vLead > 0.5 (not 1.0) so slow creeping
+    # departures still count; dRel < 20 rejects cross traffic.
     self._lead_departing = bool(lead_one.present) and float(lead_one.vLead) > 0.5 and float(lead_one.dRel) < 20.0
 
     # standstill detection
@@ -348,28 +347,18 @@ class DynamicExperimentalController:
       self._mode_manager.request_mode('blended', confidence=1.0, emergency=True)
       return
 
-    # launch fix v3: while the lead is physically pulling away from a standstill,
-    # follow it (ACC/MPC) BEFORE the slow_down branch can claim the frame.
-    # cf/seg77: slow_down held blended for ~4s while the lead kept departing.
-    # If the lead re-stops, _lead_departing drops (vLead gate) and slow_down
-    # logic resumes — MPC stops on dRel regardless, so this stays fail-safe.
-    # NOTE: must stay ahead of slow_down (see the GS 450h reorder below), or the
-    # departure stall comes back.
-    if self._standstill_count > 3 and getattr(self, '_lead_departing', False):
+    # launch fix: while the lead pulls away from a standstill, follow it on ACC/MPC before slow_down
+    # can hold blended (fail-safe: if the lead re-stops, the vLead gate drops this and MPC stops on dRel).
+    # Must stay ahead of the slow_down branch below - guarded by test_dec_radar_mode_checks_slow_down_before_lead.
+    if self._standstill_count > 3 and self._lead_departing:
       self._mode_manager.request_mode('acc', confidence=1.0)
       return
 
-    # GS 450h reorder: slow down is checked BEFORE "lead detected -> acc".
-    # Upstream checks the lead first, so the moment a lead appears the planner
-    # drops e2e from its candidate list entirely (longitudinal_planner.is_e2e).
-    # MPC can only react once radar has the target, which is why the car held its
-    # set speed toward a queue and then braked hard — the model's visual
-    # look-ahead deceleration, the part that feels human, was gone.
-    # Measured on route 015 (51 lead-decel scenes, archive/probes/_dec_mode_shadow.py):
-    #   upstream order = blended  0.2% (16/7992)
-    #   this order     = blended 65.4% (5227/7992)
-    # Cruising is unaffected (76% of frames still choose acc), so the set speed
-    # still climbs the way DEC is meant to.
+    # GS 450h reorder: slow_down BEFORE "lead -> acc". Upstream checks the lead first, so the moment
+    # radar has a target the planner drops e2e (longitudinal_planner.is_e2e) and the model's visual
+    # look-ahead braking is gone: set speed held toward a queue, then a hard brake. Cruising keeps acc.
+    # Numbers (route 015) + order guard:
+    #   openpilot/sunnypilot/tests/test_gs450h_customizations.py::test_dec_radar_mode_checks_slow_down_before_lead
     if self._has_slow_down:
       if self._urgency > 0.7:
         # Emergency: immediate blended mode for high urgency stops

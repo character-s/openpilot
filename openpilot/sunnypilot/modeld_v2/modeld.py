@@ -50,31 +50,18 @@ from openpilot.sunnypilot.models.helpers import get_active_bundle
 from openpilot.sunnypilot.selfdrive.controls.lib.relc import RoadEdgeLaneChangeController
 
 PROCESS_NAME = "openpilot.selfdrive.modeld.modeld_tinygrad"
-BIG_MODEL_TIMEOUT = 150  # GS450h: measured 80.3s cold load on chestnut (2026-08-24); 60s always timed out
+BIG_MODEL_TIMEOUT = 150  # GS450h: chestnut cold load is ~80s, upstream's 60s always timed out
 
-# Cap on the bundle's "long" override, which is a first-order lag applied to the model's
-# desiredAcceleration *after* it is produced (see smooth_value in drive_helpers.py).
-# TT ships long=".3". With DT_MDL=0.05 that is alpha = 1-exp(-0.05/0.3) = 0.154, so a step to
-# 1.0 m/s^2 only reaches 0.15 in the first frame and 0.63 after 0.3s. GS 450h's
-# longitudinalActuatorDelay is 0.05s, so this filter - not the actuator and not the model -
-# dominates the onset. That is the "soft pedal every time" the driver reported (2026-08-25).
-# ⚠ This is a cap, not a fixed value: a bundle asking for less keeps its own number.
-# ⚠ modeld also feeds LONG_SMOOTH_SECONDS into long_delay, so the planner's delay
-#   compensation follows this automatically - do not compensate for it a second time.
-# 0.15 per the driver's call (2026-08-25, ".15 or .2 is fine"): step response reaches 49%
-# in 0.1s / 74% in 0.2s, vs 28%/49% at the shipped 0.3 - most of the win with less risk
-# of surging on plan noise than 0.1 would carry.
+# GS450h: cap on the bundle's "long" override (first-order lag on desiredAcceleration, see smooth_value).
+# TT ships .3 = alpha 0.154/frame, which dominates the onset on a car whose actuator delay is .05 ("soft pedal").
+# 0.15 reaches 49% in 0.1s / 74% in 0.2s (vs 28%/49% at .3) with less surge-on-noise risk than 0.1.
+# ⚠ cap, not a fixed value. ⚠ long_delay already adds LONG_SMOOTH_SECONDS - do not compensate twice.
 LONG_SMOOTH_SECONDS_MAX = 0.15
 
-# tinygrad's AMD-over-USB backend guards the device with a flock on /tmp/am_usb:<bus>-<port>.lock
-# and takes it with LOCK_EX | LOCK_NB (system.py:144-148) - whoever asks second fails instantly
-# with "Failed to acquire lock file", which surfaces as "No interface for AMD:0 is available".
-# Measured 2026-08-25: two boots that decided at since_boot 34.0/34.6s loaded fine, the one that
-# decided at 35.3s lost the lock. Losing that race cost an entire drive's worth of driving model.
-# Nothing else in openpilot takes this lock (chestnut_present() and usb.py both read sysfs only),
-# so the contender is another modeld instance that has not exited yet - retrying is the fix.
+# GS450h: tinygrad takes /tmp/am_usb:*.lock with LOCK_EX|LOCK_NB; the only other taker is a previous
+# modeld instance still exiting, so a short retry loop is the fix (see _load_with_retry).
 EGPU_LOAD_ATTEMPTS = 5  # total attempts, not retries
-EGPU_LOCK_RETRY_WAIT = 3.0  # [s] between attempts, well inside BIG_MODEL_TIMEOUT
+EGPU_LOCK_RETRY_WAIT = 3.0  # [s] between attempts (attempts x wait must stay well inside BIG_MODEL_TIMEOUT)
 
 
 def _is_lock_contention(e: BaseException) -> bool:
@@ -85,16 +72,13 @@ def _is_lock_contention(e: BaseException) -> bool:
 def _egpu_lock_holder() -> str:
   """Who is holding the am_usb lock. Diagnosis only - never raises.
 
-  ⚠⚠ **`fuser` は「ファイルを開いているプロセス」しか教えてくれない**。flock を実際に
-  保持しているかは `/proc/locks` にしか出ない。08-30 に fuser の出力だけを見て
-  「自分がロックを握っている」と読んだが、**開いているだけの可能性と区別できていなかった**
-  (tinygrad の `flock_acquire` は `os.open` してから flock するので、**flock に失敗しても
-  fd は開いたまま残る**。しかも fd を `System` シングルトンの属性に上書き代入するため、
-  2 回目以降は前の fd が閉じられずに漏れる)。⇒ 3 つを分けて出す:
+  ⚠ `fuser` は「ファイルを開いているプロセス」しか教えてくれない。tinygrad の `flock_acquire` は `os.open`
+  してから flock するので、flock に失敗しても fd は開いたまま残る = 開いているだけと保持を区別できない。
+  flock を実際に保持しているかは `/proc/locks` にしか出ないので、3 つを分けて出す:
 
     my_fds        自分が開いている lock ファイルの fd (漏れの数)
-    flock_held_by flock を **実際に保持している** PID (me / other)
-    fuser         開いているだけのプロセス一覧 (従来の情報)
+    flock_held_by flock を実際に保持している PID (me / other)
+    fuser         開いているだけのプロセス一覧
   """
   import glob
   import subprocess
@@ -124,8 +108,7 @@ def _egpu_lock_holder() -> str:
     with open("/proc/locks") as f:
       for line in f:
         # 例: "1: FLOCK  ADVISORY  WRITE 1234 08:01:12345 0 EOF"
-        # ⚠⚠ "2: -> FLOCK ..." は **ロック待ちの行で保持者ではない**。潰して読むと
-        #   「待っているだけの自分」を「握っている自分」と誤読する (08-30 に踏みかけた)。
+        # ⚠ "2: -> FLOCK ..." はロック待ちの行で保持者ではない (潰して読むと待っている自分を保持者と誤読する)。
         raw = line.split()
         waiting = len(raw) > 1 and raw[1] == "->"
         cols = (raw[:1] + raw[2:]) if waiting else raw
@@ -133,8 +116,7 @@ def _egpu_lock_holder() -> str:
           continue
         ino = cols[5].rsplit(":", 1)[-1]
         if ino.isdigit() and int(ino) in inodes:
-          # ⚠ PID だけだと後から誰か分からない (08-30: 保持者 8132 は swaglog に 1 行も
-          #   残っておらず、modeld ですらなかった)。comm を一緒に採る。
+          # ⚠ PID だけだと後から誰か分からない (保持者が modeld とは限らない) ので comm を一緒に採る。
           try:
             with open(f"/proc/{cols[4]}/comm") as cf:
               comm = cf.read().strip()
@@ -155,11 +137,9 @@ def _load_with_retry(make_model, attempts: int = EGPU_LOAD_ATTEMPTS, wait: float
 
   Returns (model, error); model is None when every attempt failed.
 
-  ⚠⚠ 返すのは **1 回目の例外**。tinygrad は候補インターフェースを順に試し、1 つ目で
-  am_usb ロックを取ったまま初期化に失敗すると、2 つ目以降が **自分が残したロック**と
-  ぶつかる。最後の例外を返すと **本当の失敗理由が毎回「ロック競合」に化ける**
-  (08-30 に踏んだ: eGPU が 10 連敗したログが全部 `lock holder = 自分自身` で、
-  「なぜ GPU を掴めなかったのか」が 1 件も残っていなかった)。
+  ⚠⚠ 返すのは 1 回目の例外。tinygrad は候補インターフェースを順に試し、1 つ目で am_usb ロックを取ったまま
+  初期化に失敗すると 2 つ目以降が自分の残したロックとぶつかるので、最後の例外を返すと本当の失敗理由が
+  毎回「ロック競合」に化ける。
   """
   first: Exception | None = None
   cloudlog.warning(f"eGPU load starting (lock holder before: {_egpu_lock_holder()})")
@@ -169,8 +149,7 @@ def _load_with_retry(make_model, attempts: int = EGPU_LOAD_ATTEMPTS, wait: float
     except Exception as e:  # an unhandled exception in the load thread would die silently
       if first is None:
         first = e
-        # ⚠ ExceptionGroup は repr だと 1 行に潰れ、どの経路がどこで落ちたかはサブ例外の
-        #   traceback にしか無い。1 回目だけ全部展開して残す。
+        # ⚠ ExceptionGroup は repr だと 1 行に潰れる (経路ごとの原因はサブ例外の traceback にしか無い) ので 1 回目だけ全部展開する。
         cloudlog.error("eGPU load attempt 1 failed:\n" + "".join(traceback.format_exception(e)))
       if not _is_lock_contention(e) or attempt == attempts:
         break
@@ -502,13 +481,12 @@ def main(demo=False):
       # GS450h: 落ちる直前のカーネルログを残す (再起動で dmesg が消えるため)。
       save_stdio_snapshot("-loadfail")
       save_dmesg_snapshot("-loadfail")
-      # GS450h: GPU がハングしたままだと何度ロードしても失敗する。ここで USB を再列挙してから
-      # 死んでおけば、manager が再起動したときにクリーンなデバイスを掴み直せる
-      # (08-29 まではこれが無く「車を再起動するまで Big Model Failed」だった)。
+      # GS450h: GPU がハングしたままだと何度ロードしても失敗する。USB をリセットしてから死ぬ (reset_chestnut 参照)。
       reset_chestnut()
       # ⚠ 上流 (6831cf5e79) はここで small model へ降格して走り続けるが、GS 450h では採らない:
-      # big と small の実力差が大きく、restart_on_crash (5 回 / 10s backoff) で big の再ロードを
-      # 粘る方が良い (user 判断 09-01)。上限まで失敗したら bigModelFailed が engage を止める。
+      # big と small の実力差が大きく、restart_on_crash (倍々 backoff で回数では諦めない =
+      # ManagerProcess.reap_if_crashed) で big の再ロードを粘る方が良い (user 判断)。
+      # 再ロード中は bigModelLoading / bigModelFailed が engage を止める。
       raise RuntimeError(f"eGPU model load failed or timed out ({why})")
   else:
     model = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=False)
@@ -695,9 +673,8 @@ if __name__ == "__main__":
     cloudlog.warning(f"child {PROCESS_NAME} got SIGINT")
   except Exception:
     sentry.capture_exception()
-    # GS450h: eGPU で走っていたなら、死ぬ直前に USB を再列挙しておく。tinygrad の
-    # "Wait timeout" は GPU がハングしたまま残るので、プロセスを殺し直すだけでは
-    # 次のロードも失敗する。manager 側の再起動 (restart_on_crash) と対で効く。
+    # GS450h: eGPU で走っていたなら死ぬ直前に USB をリセットしておく (reset_chestnut 参照)。
+    # manager 側の再起動 (restart_on_crash) と対で効く。
     try:
       save_stdio_snapshot("-crash")
       save_dmesg_snapshot("-crash")

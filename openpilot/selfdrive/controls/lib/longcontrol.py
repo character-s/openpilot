@@ -14,25 +14,12 @@ LongCtrlState = car.CarControl.Actuators.LongControlState
 PLN3_GO_SUSTAIN_LEAD = 0.5     # [s] shouldStop must stay false this long (lead present)
 PLN3_LEAD_SUSTAIN = 1.0        # [s] hasLead must persist this long to count (ghost leads)
 
-# Lead-less auto resume. This is what makes the car pull away from a red light on its own,
-# so it is gated on which model is actually driving:
-#
-#   16D (small)  PLN3_GO_SUSTAIN_NOLEAD = None  -> disabled.
-#                Measured false GO 3/9 while stopped. That is why this was turned off.
-#   TT  (big)    PLN3_GO_SUSTAIN_NOLEAD_BIG     -> 1.5s.
-#                08-24 first drive: all 14 signal stops needed the driver's gas pedal, and the
-#                only thing holding the car was resume_ok - the model's GO led the human's
-#                launch by p50 1.2s and the plan had already flipped.
-#                Started at 2.0s; the driver called it too slow on the first drive where it
-#                actually fired (2026-08-25), so 1.5s. Route 162 (110 seg, same day) backs
-#                this: all 5 lead-less auto launches sat at go_timer 2.01-2.02s = the sustain
-#                itself was the bottleneck, and every aborted GO burst was <= 1.35s, so 1.5s
-#                would have launched exactly the same 5 and no flyer. ⚠ that longest flyer
-#                (1.35s) leaves only 0.15s of margin - if a false GO ever launches the car,
-#                this is the number to put back up, not something to tune further down.
-#
-# ⚠ modeld falls back to the small model whenever the eGPU is missing or fails to load, so this
-#   MUST follow the model at runtime, not a build-time constant.
+# Lead-less auto resume (pull away from a red light on its own), gated on which model is driving:
+#   small (16D): None = disabled (measured false GO 3/9 while stopped)
+#   big  (TT):   1.5s. 2.0 felt too slow; every real auto launch sat at go_timer 2.0x and the longest
+#                aborted GO burst was 1.35s, so 1.5 launches the same ones and no flyer.
+#                ⚠ only 0.15s of margin: if a false GO ever launches the car, put this back UP.
+# ⚠ modeld falls back to small when the eGPU is missing/fails, so this follows the model at runtime.
 PLN3_GO_SUSTAIN_NOLEAD = None      # [s] small model; None disables auto resume
 PLN3_GO_SUSTAIN_NOLEAD_BIG = 1.5   # [s] big model on the eGPU
 
