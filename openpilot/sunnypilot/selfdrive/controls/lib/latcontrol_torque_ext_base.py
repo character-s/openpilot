@@ -70,9 +70,8 @@ class LatControlTorqueExtBase:
     self.torque_params = lac_torque.torque_params
 
     self._ff = 0.0
-    # ★ NNL-8: NNLC 専用の PID インスタンス。以前は latcontrol_torque_ext.py L21 で
-    # base の PID (lat accel 空間) を `self._pid = pid` と差し込んで共有していた。
-    # rate は base (`PIDController(..., rate=1/self.dt)`, dt=DT_CTRL) と同じ 100Hz。
+    # NNL-8: NNLC 専用の PID (base の lat accel 空間 PID は共有しない、理由は latcontrol_torque_ext.py)。
+    # rate は base (dt=DT_CTRL) と同じ 100Hz。
     self._pid = PIDController([KP_TQ_SPEEDS, KP_TQ_INTERP], KI, rate=100)
     self._pid_log = None
     self._setpoint = 0.0

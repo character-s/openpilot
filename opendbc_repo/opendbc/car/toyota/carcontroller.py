@@ -107,8 +107,7 @@ class CarController(CarControllerBase, GasInterceptorCarController):
     hud_control = CC.hudControl
     pcm_cancel_cmd = CC.cruiseControl.cancel
 
-    # controlsd can briefly request cancel between CRUISE_ACTIVE rising and
-    # CC.enabled propagation. Suppress only that edge case, never every cancel.
+    # arm the keepalive cancel suppression on the CRUISE_ACTIVE rising edge (see the ACC_CONTROL TX)
     if self.sdsu_keepalive:
       cruise_enabled = CS.out.cruiseState.enabled
       if cruise_enabled and not self.sdsu_prev_cruise_enabled and not CC.enabled:
@@ -306,41 +305,29 @@ class CarController(CarControllerBase, GasInterceptorCarController):
         if self.CP.carFingerprint in TSS2_CAR:
           pass
         elif self.CP.carFingerprint == CAR.LEXUS_GS_F:
-          # creep band (v<0.5): fade out PCM compensation to avoid limit cycle vs creep torque
-          _comp_frac = float(np.interp(CS.out.vEgo, [0.5, 1.0], [0.0, 1.0]))
-          # PLN-1_6: but keep full compensation while we are clearly braking to a stop.
-          # The 07-15 limit cycle came from *holding* a near-zero request (-0.03) against
-          # creep torque, not from stopping, so gating on the request separates the two.
-          # Measured 08-28 (archive/probes/_stop_dawdle.py):
-          #   - stopping asks for -0.45 but only -0.21..-0.26 comes out below 0.5 m/s
-          #     (47-69% of the request, vs 77-85% above it) — that shortfall is why the
-          #     car crawled the last ~1.3 m instead of stopping
-          #   - the limit-cycle condition (v 0.15-0.6 with |accel|<0.15 held >=1 s) ran
-          #     0.078 s/seg on b3 (OPM10V3 + DEC ON, before this fade) but only
-          #     0.005 s/seg over 218 seg of current routes, and every occurrence is a
-          #     near-zero request, so they stay faded exactly as before
-          if actuators.accel < -0.2:
-            _comp_frac = 1.0
+          # creep band (v<0.5): fade out PCM compensation to avoid a limit cycle against creep torque.
+          # PLN-1_6: keep full compensation while clearly braking (accel < -0.2 sits between a stop request of ~-0.45
+          # and the ~0 held request that caused the limit cycle) - the cycle came from *holding* a near-zero request,
+          # not from stopping (measured: archive/probes/_stop_dawdle.py).
+          _comp_frac = 1.0 if actuators.accel < -0.2 else float(np.interp(CS.out.vEgo, [0.5, 1.0], [0.0, 1.0]))
           pcm_accel_cmd = actuators.accel + (pcm_accel_cmd - actuators.accel) * _comp_frac
         else:
           pcm_accel_cmd = actuators.accel
         pcm_accel_cmd = float(np.clip(pcm_accel_cmd, self.params.ACCEL_MIN, self.params.ACCEL_MAX))
 
         main_accel_cmd = 0. if self.CP.flags & ToyotaFlags.SECOC.value else pcm_accel_cmd
-        if CC.longActive:
-          can_sends.append(toyotacan.create_accel_command(self.packer, main_accel_cmd, pcm_cancel_cmd, self.permit_braking, self.standstill_req, lead,
+        cancel = pcm_cancel_cmd
+        if self.sdsu_keepalive and not CC.longActive:
+          # Neutral ACC_CONTROL heartbeat for the sDSU 0x283 generator (pre-init is covered by
+          # the carstate timeout); keep every non-acceleration field aligned with the normal
+          # Toyota TX path. controlsd can briefly request cancel between CRUISE_ACTIVE rising
+          # and CC.enabled propagation, so drop only those SDSU_ENGAGE_CANCEL_SUPPRESS_TX
+          # frames, never every cancel.
+          main_accel_cmd = 0.
+          cancel = pcm_cancel_cmd and self.sdsu_cancel_suppress_tx == 0
+          self.sdsu_cancel_suppress_tx = max(0, self.sdsu_cancel_suppress_tx - 1)
+        can_sends.append(toyotacan.create_accel_command(self.packer, main_accel_cmd, cancel, self.permit_braking, self.standstill_req, lead,
                                                         CS.acc_type, fcw_alert, self.distance_button))
-        elif self.sdsu_keepalive:
-          suppress_cancel = pcm_cancel_cmd and self.sdsu_cancel_suppress_tx > 0
-          cancel = pcm_cancel_cmd and not suppress_cancel
-          if self.sdsu_cancel_suppress_tx > 0:
-            self.sdsu_cancel_suppress_tx -= 1
-
-          # Neutral ACC_CONTROL heartbeat. This begins only after CarController
-          # initialization; the carstate 10 Hz timeout basis covers pre-init. Keep
-          # all non-acceleration fields aligned with the normal Toyota TX path.
-          can_sends.append(toyotacan.create_accel_command(self.packer, 0., cancel, self.permit_braking, self.standstill_req, lead,
-                                                          CS.acc_type, fcw_alert, self.distance_button))
         if self.CP.flags & ToyotaFlags.SECOC.value:
           acc_cmd_2 = toyotacan.create_accel_command_2(self.packer, pcm_accel_cmd)
           acc_cmd_2 = add_mac(self.secoc_key,

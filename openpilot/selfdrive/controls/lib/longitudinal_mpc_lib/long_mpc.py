@@ -54,39 +54,20 @@ T_IDXS = np.array(T_IDXS_LST)
 FCW_IDXS = T_IDXS < 5.0
 T_DIFFS = np.diff(T_IDXS, prepend=[0.])
 COMFORT_BRAKE = 2.5
-# ⚠⚠ この定数は **コンパイル時にしか効かない**。gen_long_ocp() が casadi の式に埋め込み、
-# acados が C を吐いた時点で焼き付く (c_generated_code/long_cost/long_cost_y_fun.c の `a4=6.;`)。
-# この repo は生成済み C と .so を同梱し、root の `prebuilt` で launch_chffrplus.sh の
-# ビルドを飛ばす。生成をやり直す SConscript も無い (SCons は panda のみ)。
-# => ここを書き換えても実機の MPC は一切変わらない。実際 PLN-1_4 で 6.0 -> 7.5 -> 8.5 と
-#    上げていたが、生成済み C は全 git 履歴で 6.0 のままだった (2026-08-28 に判明)。
-# 実行時に停止位置を動かしたいときは EXTRA_STOP_DISTANCE を使うこと。
+# ⚠⚠ この定数はコンパイル時にしか効かない: gen_long_ocp() が casadi の式に埋め込み、acados が吐いた C
+# (c_generated_code/long_cost/long_cost_y_fun.c) に焼き付く。この repo は生成済み C と .so を同梱し
+# `prebuilt` でビルドを飛ばすので、ここを書き換えても実機の MPC は変わらない (PLN-1_4 で 8.5 まで上げても
+# C は 6.0 のままだった)。実行時に停止位置を動かしたいときは EXTRA_STOP_DISTANCE を使うこと。
 # 一致は test_gs450h_customizations.test_stop_distance_matches_compiled_cost() が見張る。
 STOP_DISTANCE = 6.0
 
-# GS450h PLN-1_7: 停止時に前車へ詰めすぎるのを直す。
-# cost は ((x_obstacle - x_ego) - desired_dist) なので、x_obstacle を手前に引くのは
-# STOP_DISTANCE を増やすのと数学的に等価。しかも x_obstacle は runtime parameter
-# (params[:,2]) なので、コンパイル済みの cost 式に触れずに効かせられる。
-#
-# 実測 (2026-08-28、archive/probes/_stop_creep.py、前車静止 21 停止):
-#   停止時 dRel p50 3.4m。実効目標 6.0 に対し 2.6m の食い込みで、upstream 通例と同程度
-#   (GS 固有の異常ではない)。内訳は MPC の構造的アンダーシュート ~1.9m と PCM の執行不足
-#   ~0.7m で、後者は PLN-1_6 が別途叩く。ここは前者だけを動かす。
-# 検証済み shadow (archive/probes/_stop_mpc_sim.py。--verify-plan の無バイアス再現で
-# 中央バイアス +0.021 / |err| p50 0.082 m/s^2) の閉ループ (v0=6.0, dRel0=18.9, 前車静止):
-#   extra 0 -> 4.10m   1.5 -> 5.48m   2.0 -> 5.89m   2.5 -> 6.32m
-# ⚠ 同じ量を STOP_DISTANCE 側に足しても同じにはならない (2.5 なら 5.79m 止まり)。
-#   danger zone constraint が 0.75*desired を使うため、obstacle を引く方は 0.75 倍の
-#   希釈を受けず 0.5m ほど強く出る。「STOP_DISTANCE を N 上げるのと同じ」と思って値を
-#   決めると効き過ぎる。
-# sim は実測より 0.7m 楽観 (baseline 4.10 に対し実測 p50 3.4) なので、2.0 の実車見込みは
-# 停止 dRel p50 3.4 -> 約 5.2m。⚠ PLN-1_6 (執行率の改善) と効果が重なるため、両方が
-# 載った初回走行では上振れし得る。次走の _stop_creep.py で確認して詰めること。
-#
-# 前車が動いていれば 0 にフェードする。定常追従の車間は t_follow*v + STOP_DISTANCE で
-# 決まるので、素の STOP_DISTANCE を上げると全速度域で車間が伸びる (「巡航が伸びない」
-# 不満を悪化させる)。停止時だけに効かせるためのゲート。
+# GS450h PLN-1_7: 停止時に前車へ詰めすぎる (停止 dRel p50 3.4m vs 目標 6.0) のを直す。
+# x_obstacle を手前に引くのは STOP_DISTANCE を足すのと等価だが、x_obstacle は runtime parameter
+# (params[:,2]) なのでコンパイル済み cost に触れずに効く (上の STOP_DISTANCE の注意を参照)。
+# ⚠ 同じ量を STOP_DISTANCE に足したのと同じにはならない: danger zone constraint が 0.75*desired を
+#   使うため obstacle 側は 0.5m ほど強く出る (sim: extra 2.0 -> 停止 5.89m、実測は約 0.7m 楽観)。
+# 前車が動いていれば 0 にフェード = 巡航の車間 (t_follow*v + STOP_DISTANCE) は変えない。
+# 実測と shadow = archive/probes/_stop_creep.py / _stop_mpc_sim.py。
 EXTRA_STOP_DISTANCE = 2.0
 EXTRA_STOP_DISTANCE_BP = [1.0, 3.0]  # [m/s] 前車速度。この区間で全量 -> 0
 
@@ -120,11 +101,7 @@ def get_safe_obstacle_distance(v_ego, t_follow):
   return (v_ego**2) / (2 * COMFORT_BRAKE) + t_follow * v_ego + STOP_DISTANCE
 
 def get_extra_stop_distance(v_lead):
-  """GS450h PLN-1_7: 前車が止まっているときだけ x_obstacle を手前に引く量 [m]。
-
-  x_obstacle から引くのは STOP_DISTANCE を足すのと等価だが、こちらは runtime parameter
-  なので acados の再生成なしで効く。前車が動き出せば 0 になり巡航の車間は変わらない。
-  """
+  """GS450h PLN-1_7: 前車が止まっているときだけ x_obstacle を手前に引く量 [m] (根拠は EXTRA_STOP_DISTANCE の注記)。"""
   return EXTRA_STOP_DISTANCE * np.interp(v_lead, EXTRA_STOP_DISTANCE_BP, [1.0, 0.0])
 
 def gen_long_model():
@@ -359,9 +336,7 @@ class LongitudinalMpc:
     # To estimate a safe distance from a moving lead, we calculate how much stopping
     # distance that lead needs as a minimum. We can add that to the current distance
     # and then treat that as a stopped car/obstacle at this new distance.
-    # GS450h PLN-1_7: 前車が止まっている区間だけ obstacle を手前に置く = 停止位置を奥へ。
-    # 予測 lead 速度 (lead_xv[:,1]) で段ごとに判定するので、前車が発進する見込みなら
-    # 地平線の先の方から自然に 0 へ戻る。
+    # GS450h PLN-1_7: 前車が止まっている区間だけ obstacle を手前に置く (予測 lead 速度で段ごとに判定)。
     lead_0_obstacle = (lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1])
                        - get_extra_stop_distance(lead_xv_0[:,1]))
     lead_1_obstacle = (lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1])
