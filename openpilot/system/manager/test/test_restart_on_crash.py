@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest import mock
 
 from openpilot.common.test import OpenpilotTestCase
@@ -5,35 +6,17 @@ import openpilot.system.manager.process as process_mod
 from openpilot.system.manager.process import ManagerProcess
 
 
-class _Dead:
-  """終了済みプロセスの代役 (exitcode が None なら「まだ生きている」)。"""
-
-  def __init__(self, exitcode: int | None = 1):
-    self.exitcode = exitcode
-
-
 class _Proc(ManagerProcess):
-  def __init__(self):
-    self.name = "modeld_tinygrad"
-    self.restart_on_crash = True
-    self.crash_count = 0
-    self.last_crash_t = 0.0
-    self.last_start_t = 0.0
-    self.proc = None
-    self.shutting_down = False
+  """restart_on_crash だけ ON。他は ManagerProcess のクラス属性既定値 (proc=None, count=0 ...) のまま。"""
+  name = "modeld_tinygrad"
+  restart_on_crash = True
 
-  def start(self) -> None:
-    self.proc = _Dead()
-    self.last_start_t = process_mod.time.monotonic()
+  def start(self) -> None:  # abstractmethod の穴埋め。テストは proc を直接差し替える
+    pass
 
 
 class TestRestartOnCrash(OpenpilotTestCase):
-  """chestnut の GPU ハングから big model のまま復帰させる再起動ロジック。
-
-  ⚠⚠ 08-30 実車の実測が前提: 30-60 秒間隔の再ロードは **10 回連続で `no pcie`** に終わり、
-  **4 分 28 秒空けた 1 回**で復帰した。失敗と成功の違いは **間隔だけ**。
-  「n 回で諦める」設計はこの復帰を永久に取り逃すので、回数では打ち切らない。
-  """
+  """chestnut の GPU ハングから big model のまま復帰させる再起動ロジック (回数で打ち切らず、待ちを倍にする)。"""
 
   def setUp(self):
     self.now = 1000.0
@@ -44,7 +27,7 @@ class TestRestartOnCrash(OpenpilotTestCase):
 
   def _crash(self) -> bool:
     """落ちた状態にして reap を試みる。掃除されて再起動できる状態になったら True。"""
-    self.p.proc = _Dead()
+    self.p.proc = SimpleNamespace(exitcode=1)
     with mock.patch.object(process_mod.cloudlog, "error"):
       self.p.reap_if_crashed()
     return self.p.proc is None
@@ -102,7 +85,7 @@ class TestRestartOnCrash(OpenpilotTestCase):
     self.assertFalse(self._crash())
 
   def test_ignores_while_still_running(self):
-    self.p.proc = _Dead(exitcode=None)
+    self.p.proc = SimpleNamespace(exitcode=None)  # exitcode None = まだ生きている
     with mock.patch.object(process_mod.cloudlog, "error"):
       self.p.reap_if_crashed()
     self.assertIsNotNone(self.p.proc)

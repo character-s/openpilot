@@ -1,10 +1,8 @@
 """Lane Centering の設定ウィジェット (mici)。
 
 ⚠⚠ **なぜ `BigParamControl` をそのまま使えないのか**: あれは `Params` 直叩きだが、この 4 つは
-**openpilot の Params に置いていない**。`/data/params` に置くと `clearAll` のホワイトリスト
-(= `libparams_c.so` に焼かれた表。release 配布では fork がヘッダに足しても載らない) から外れて
-**manager 起動のたびに消される**ため (2026-08-26 に c4 で確認)。保存先は `/data/params_fork/d` で、
-その読み書きは `lane_centering_params` が持っている。⇒ そこを経由する版をここに置く。
+**openpilot の Params に置いていない** (理由 = `lane_centering_params` のモジュール docstring)。
+読み書きは `lane_centering_params` が持っているので、そこを経由する版をここに置く。
 
 ⚠ 新規ファイルにしているのは `widgets/button.py` が upstream 側のファイルで、追従のたびに
 衝突しうるため。既存クラスの継承だけで済ませて button.py には手を入れない。

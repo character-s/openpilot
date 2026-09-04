@@ -47,23 +47,38 @@ def _update(controller, model, *, offset=0.0, authority=0.0, enabled=True, activ
   return controller.update(0.0, model, speed, active, valid, lane_change, turn_signal_active)
 
 
-def _converge(model, *, offset=0.0, authority=0.0, speed=_V_EGO):
+def _feed(controller, model, n, **kw):
+  out = 0.0
+  for _ in range(n):
+    out = _update(controller, model, **kw)
+  return out
+
+
+def _converge(model, **kw):
   controller = LaneCenteringController()
-  output = 0.0
-  for _ in range(300):
-    output = _update(controller, model, offset=offset, authority=authority, speed=speed)
-  return controller, output
+  return controller, _feed(controller, model, 300, **kw)
 
 
-@pytest.mark.parametrize(
-  "kwargs",
-  [
-    {"enabled": False},
-    {"active": False},
-    {"valid": False},
-    {"speed": 2.4},   # 09-02: 門は 2.5 m/s (9km/h)。旧 5.0
-  ],
-)
+def _narrow(**kw):
+  return _model(left=-1.5, right=1.5, **kw)                # 幅 3.0m、誤差 0
+
+
+def _widened():
+  return _model(left=-1.5, right=2.5, path_std=0.6)        # 幅 4.0m、誤差 0.5m (path_std 大 = authority を効かせない)
+
+
+def _settled_on_narrow():
+  """幅 3.0m を authority=1.0 で 200 frame 慣らした controller (幅急変ガードの前提)。毎回新規に組む。"""
+  c = LaneCenteringController()
+  _feed(c, _narrow(), 200, authority=1.0)
+  return c
+
+
+_HARD_GATES = [{"active": False}, {"valid": False}, {"speed": 2.4}]   # 速度門 2.5 m/s (9km/h) の直下
+_HIGH_SPEEDS = [12.5, 15.0, 20.0, 30.0]                                  # 低速スケジュールの上端 (12.5 m/s = 45km/h) 以上
+
+
+@pytest.mark.parametrize("kwargs", [{"enabled": False}, *_HARD_GATES])
 def test_hard_gates_are_noop(kwargs):
   assert _update(LaneCenteringController(), _model(left=-1.5, right=2.1), **kwargs) == 0.0
 
@@ -78,8 +93,7 @@ def test_turn_signal_fades_correction():
   fading = _update(controller, model, pause_on_signal=True, turn_signal_active=True)
   assert 0.0 < fading < centered
 
-  for _ in range(300):
-    fading = _update(controller, model, pause_on_signal=True, turn_signal_active=True)
+  fading = _feed(controller, model, 300, pause_on_signal=True, turn_signal_active=True)
   assert abs(fading) < 1e-6
 
 
@@ -97,29 +111,24 @@ def test_disabling_fades_correction():
   fading = _update(controller, model, enabled=False)
   assert 0.0 < fading < centered                  # 1 frame では消えない
 
-  for _ in range(300):
-    fading = _update(controller, model, enabled=False)
+  fading = _feed(controller, model, 300, enabled=False)
   assert fading == 0.0                            # 最後は完全に 0 (計算からも降りる)
 
 
-def test_hard_gates_still_drop_correction_immediately():
-  """latActive off / 低速 / モデル停止は即断のままであること (enabled OFF との対比)。
-
-  これらは補正がそもそも舵に出ていない場面なので、平滑して残す方が有害
-  (再 engage で古い補正から平滑が再開する)。
-  """
+@pytest.mark.parametrize("gate", _HARD_GATES)
+def test_hard_gates_still_drop_correction_immediately(gate):
+  """latActive off / 低速 / モデル停止は即断のまま (enabled OFF の平滑化との対比)。
+  補正が舵に出ていない場面なので平滑して残す方が有害 (再 engage で古い補正から再開する)。"""
   model = _model(left=-1.5, right=2.1)
-  for gate in ({"active": False}, {"valid": False}, {"speed": 2.4}):
-    controller, centered = _converge(model)
-    assert centered > 0.0
-    assert _update(controller, model, **gate) == 0.0
-    assert controller._correction == 0.0
+  controller, centered = _converge(model)
+  assert centered > 0.0
+  assert _update(controller, model, **gate) == 0.0
+  assert controller._correction == 0.0
 
 
 def test_turn_signal_pause_can_be_disabled():
   model = _model(left=-1.5, right=2.1)
-  _, output = _converge(model)
-  controller, _ = _converge(model)
+  controller, output = _converge(model)          # 決定的なので 1 回で controller と出力の両方が取れる
   signaled = _update(controller, model, turn_signal_active=True)
   assert signaled == pytest.approx(output, abs=1e-7)
 
@@ -198,11 +207,11 @@ def test_e2e_authority_blends_lane_correction():
 def test_confidence_loss_drops_filtered_correction():
   controller, output = _converge(_model(left=-1.5, right=2.1))
   assert output > 0.0
-  fading = _update(controller, _model(left=-1.5, right=2.1, lane_prob=0.2))
+  unsure = _model(left=-1.5, right=2.1, lane_prob=0.2)
+  fading = _update(controller, unsure)
   assert 0.0 < fading < output
 
-  for _ in range(300):
-    fading = _update(controller, _model(left=-1.5, right=2.1, lane_prob=0.2))
+  fading = _feed(controller, unsure, 300)
   assert abs(fading) < 1e-6
 
 
@@ -217,13 +226,11 @@ def test_correction_is_smoothed_and_capped():
 
 # ── ここから GS 向けに追加 ─────────────────────────────────────────────
 
-@pytest.mark.parametrize("speed", [12.5, 15.0, 20.0, 30.0])
+@pytest.mark.parametrize("speed", _HIGH_SPEEDS)
 def test_effective_gain_is_speed_invariant_in_lat_accel(speed):
-  """la 換算のゲインが 12.5-35 m/s (09-02: 下端 8 → 12.5 = 低速スケジュールの上端) で 0.6 × (|err| - deadband) になること。
+  """la 換算のゲインが 12.5-35 m/s (下端 = 低速スケジュールの上端) で 0.6 × (|err| - deadband) になること。
 
-  これが「big の復元勾配 g = 0.0017-0.0035 /m と同オーダー = P だけで平衡点が動く」という
-  採否判断の根拠なので、実装から実際にその値が出ることを固定する (memory
-  `project_gs_lateral_nlcc` の「⏭ 方針」節の綱引き計算)。
+  「big の復元勾配と同オーダー = P だけで平衡点が動く」という採否判断の根拠なので、実装から出る値を固定する。
   """
   err = 0.3          # 中心が +0.3m 右 = 車が 0.3m 左寄り
   _, steady = _converge(_model(left=-1.5, right=2.1), speed=speed)
@@ -245,12 +252,16 @@ def test_low_speed_saturates_at_the_curvature_cap(speed):
   assert np.isclose(steady, 0.004 * _gain_for(speed), rtol=1e-2)   # 300 frame の平滑残差 (tau 0.4s) を許す
 
 
-def test_lowspeed_schedule_leaves_high_speed_untouched():
-  """09-02 の低速スケジュールは 12.5 m/s (45km/h) 以上を一切変えないこと (user「速度が出ているときは真ん中で良い」)。"""
-  for v in (12.5, 15.0, 20.0, 30.0):
-    assert _gain_for(v) == pytest.approx(0.30)
-    assert _deadband_for(v) == pytest.approx(0.08)
-    assert _lookahead_min_for(v) == pytest.approx(8.0)
+@pytest.mark.parametrize("v", _HIGH_SPEEDS)
+def test_lowspeed_schedule_leaves_high_speed_untouched(v):
+  """低速スケジュールは 12.5 m/s (45km/h) 以上を一切変えないこと (user「速度が出ているときは真ん中で良い」)。"""
+  assert _gain_for(v) == pytest.approx(0.30)
+  assert _deadband_for(v) == pytest.approx(0.08)
+  assert _lookahead_min_for(v) == pytest.approx(8.0)
+
+
+def test_lowspeed_schedule_changes_the_low_end():
+  """対になる側: 8 m/s 以下ではゲイン 1.0 / 不感帯 0.04 / lookahead 下限 6m になっていること。"""
   assert _gain_for(8.0) == pytest.approx(1.0)
   assert _deadband_for(8.0) == pytest.approx(0.04)
   assert _lookahead_min_for(5.0) == pytest.approx(6.0)
@@ -259,8 +270,7 @@ def test_lowspeed_schedule_leaves_high_speed_untouched():
 def test_lowspeed_acts_on_small_error_but_high_speed_does_not():
   """6cm の左寄り: 低速 (5.5 m/s) では不感帯 0.04 を超えて補正が出る / 20 m/s では不感帯 0.08 の中で 0 のまま。
 
-  IDM は <18km/h で計画が +0.12〜0.18m 左、29-45km/h で +0.06〜0.09m 左 (09-02 の `_lane_analysis.py`
-  速度帯別表)。旧定数では 29-45km/h の寄りが不感帯に丸ごと入っていて LC が何もしていなかった。
+  旧定数では低速帯の寄りが不感帯に丸ごと入っていて LC が何もしていなかった。
   """
   model = _model(left=-1.74, right=1.86)   # 中心 +0.06 (右) = 車が 6cm 左
   _, low = _converge(model, speed=5.5)
@@ -270,23 +280,15 @@ def test_lowspeed_acts_on_small_error_but_high_speed_does_not():
 
 
 def test_narrow_lane_gate_stays_at_upstream_value():
-  """幅門の下限は原版どおり 2.6m。
-
-  08-26 実測で幅 p01 = 2.59m / 2.6m 未満は 1.14% しかないと分かったので、下げる理由がない
-  (下げれば upstream との差分が増えるだけ)。
-  """
+  """幅門の下限は原版どおり 2.6m (2.6m 未満は 1% 台で、下げれば upstream との差分が増えるだけ)。"""
   _, at_2_7m = _converge(_model(left=-1.1, right=1.6))    # 幅 2.7m → 通る
   _, at_2_5m = _converge(_model(left=-1.0, right=1.5))    # 幅 2.5m → 落ちる
   assert at_2_7m > 0.0
   assert at_2_5m == 0.0
 
 
-def test_default_authority_keeps_full_gain_over_our_offset_band():
-  """GS 変更点 2: break_in 帯を 0.40-0.60m へ。既定 authority 1.0 のままでも、うちの定常
-  イン寄り帯 (実測 p50 0.22-0.26 / p75 0.38-0.39m) では減衰しないこと。
-
-  原版の帯 (0.15-0.50) だとこの帯がまるごと減衰域に入って平衡点の移動が -45% → -17% になる。
-  """
+def test_default_authority_keeps_full_gain_below_break_in_band():
+  """既定 authority 1.0 のままでも、break_in 帯 (0.15-0.50m) の手前の誤差では減衰しないこと。"""
   controller = LaneCenteringController()
   assert controller.e2e_authority == 1.0   # 既定は原版どおり (0 にすると構造変化の保護が消える)
 
@@ -297,12 +299,8 @@ def test_default_authority_keeps_full_gain_over_our_offset_band():
 
 
 def test_break_in_band_is_upstream_default():
-  """break_in 帯は原版のまま (0.15-0.50m)。
-
-  08-26: 誤差帯別のカーブ率 (0.4-0.6m で 52.9% / 0.6-0.8m で 79.5%) から一度 0.70-0.90 へ広げたが、
-  綱引き `0.455×(0.40-d) = f(d)` を解くと平衡点は原版 0.245m / 広げた版 0.218m で**差 2.7cm**。
-  補正が山型なので平衡点は「山の内側」に落ち、帯を広げても大して変わらない。⇒ 原版に戻した。
-  """
+  """break_in 帯は原版のまま (0.15-0.50m)。補正が山型なので帯を広げても平衡点はほぼ動かない
+  (綱引き 0.455×(0.40-d) = f(d) の解は原版 0.245m / 0.70-0.90 版 0.218m = 差 2.7cm)。"""
   _, small = _converge(_model(left=-1.65, right=1.95, path_std=0.1), authority=1.0)  # 誤差 0.15m
   _, large = _converge(_model(left=-1.3, right=2.3, path_std=0.1), authority=1.0)    # 誤差 0.50m
   assert small > 0.0
@@ -316,25 +314,12 @@ def test_width_jump_suspends_correction():
   path_std が大きい (モデルも迷っている) 場面では authority の break_in が効かないので、
   幅の跳びを独立に見る必要がある。
   """
-  straight = _model(left=-1.5, right=1.5)                       # 幅 3.0m、誤差 0
-  widened = _model(left=-1.5, right=2.5, path_std=0.6)          # 幅 4.0m、誤差 0.5m、std 大
-  controller = LaneCenteringController()
-  for _ in range(200):
-    _update(controller, straight, authority=1.0)
-
-  for _ in range(50):                                           # 跳んだ直後 0.5s
-    out = _update(controller, widened, authority=1.0)
-  assert abs(out) < 1e-9
-
-  for _ in range(400):                                          # 新しい幅に馴染めば復帰する
-    out = _update(controller, widened, authority=1.0)
-  assert out > 0.0
+  controller = _settled_on_narrow()
+  assert abs(_feed(controller, _widened(), 50, authority=1.0)) < 1e-9   # 跳んだ直後 0.5s
+  assert _feed(controller, _widened(), 400, authority=1.0) > 0.0        # 新しい幅に馴染めば復帰する
 
 
 # ── 保存先 (`/data/params_fork/d`) の読み経路と幅ガードの状態管理 ──────────────
-# ⚠ どちらも移植時に足した部分なので自前で固める。⚠⚠ 値の出所は **ファイル 1 本**で、
-# openpilot の Params は読みも書きも経由しない。経由すると `.so` を焼いた端末とそうでない端末で
-# 挙動が変わり、「毎ブート消える」が別の形で再発する (lane_centering_params の docstring 参照)。
 
 @pytest.fixture(autouse=True)
 def param_dir(tmp_path, monkeypatch):
@@ -394,13 +379,7 @@ def test_unreadable_key_falls_back_to_its_default_not_a_stale_value(param_dir):
 
 
 def test_values_come_from_the_file(param_dir):
-  """値の出所は保存先のファイルであること。
-
-  ⚠⚠ ここが本題。`/data/params` に置いていた頃は `clearAll` (ホワイトリストは
-  `libparams_c.so` に焼かれた表で、fork がヘッダに足しても release 配布では載らない) が
-  **manager 起動のたびにファイルを消す**ので、c4 はエンジンをかけるたびに設定が既定値へ
-  戻っていた (2026-08-26 実機)。保存先を params の外に出したことで起きなくなる。
-  """
+  """値の出所は lcp.PARAM_DIR のファイル 1 本 (Params を経由しない理由は lcp モジュール docstring)。"""
   (param_dir / "LaneCentering").write_bytes(b"1")
   (param_dir / "LaneCenterOffset").write_bytes(b"-0.12")
 
@@ -437,25 +416,15 @@ def test_params_nan_is_rejected(param_dir):
   assert c.offset == 0.2
 
 
-def _feed(controller, model, n, **kw):
-  out = 0.0
-  for _ in range(n):
-    out = _update(controller, model, **kw)
-  return out
-
-
 def test_width_reference_survives_low_speed_gap():
   """停車 (v<5) を挟んでも幅の基準が残り、その後の幅急変を捕まえられること。
 
   reset() が _width_ref も消していると、発進直後に基準が現在幅で初期化されて
   width_jump = 0 になり、低速の交差点まわり = ガードが最も要る区間で素通りする。
   """
-  narrow = _model(left=-1.5, right=1.5)               # 幅 3.0m
-  widened = _model(left=-1.5, right=2.5, path_std=0.6)  # 幅 4.0m (authority を効かせない)
-  c = LaneCenteringController()
-  _feed(c, narrow, 200, authority=1.0)
-  _update(c, narrow, speed=4.9, authority=1.0)        # 停車 → reset パスを通す
-  assert abs(_feed(c, widened, 50, authority=1.0)) < 1e-9
+  c = _settled_on_narrow()
+  _update(c, _narrow(), speed=4.9, authority=1.0)     # 停車 → reset パスを通す
+  assert abs(_feed(c, _widened(), 50, authority=1.0)) < 1e-9
 
 
 def test_width_reference_survives_out_of_gate_width():
@@ -463,23 +432,17 @@ def test_width_reference_survives_out_of_gate_width():
 
   門外で基準を捨てると、門内に復帰した瞬間に現在幅で初期化されて跳びを見逃す。
   """
-  narrow = _model(left=-1.5, right=1.5)                 # 幅 3.0m
   too_wide = _model(left=-1.5, right=3.6)               # 幅 5.1m = 門外
-  widened = _model(left=-1.5, right=2.5, path_std=0.6)  # 幅 4.0m = 門内に復帰
-  c = LaneCenteringController()
-  _feed(c, narrow, 200, authority=1.0)
+  c = _settled_on_narrow()
   _feed(c, too_wide, 30, authority=1.0)
-  assert abs(_feed(c, widened, 30, authority=1.0)) < 1e-9
+  assert abs(_feed(c, _widened(), 30, authority=1.0)) < 1e-9   # 幅 4.0m = 門内に復帰
 
 
 def test_lane_change_drops_width_reference():
   """車線変更のときだけは基準を捨てること (走る車線自体が変わるため)。"""
-  narrow = _model(left=-1.5, right=1.5)
-  widened = _model(left=-1.5, right=2.5, path_std=0.6)
-  c = LaneCenteringController()
-  _feed(c, narrow, 200, authority=1.0)
-  _update(c, _model(left=-1.5, right=1.5, lane_change=1), authority=1.0)
-  assert _feed(c, widened, 300, authority=1.0) > 0.0   # 新しい幅を基準に補正が復帰する
+  c = _settled_on_narrow()
+  _update(c, _narrow(lane_change=1), authority=1.0)
+  assert _feed(c, _widened(), 300, authority=1.0) > 0.0   # 新しい幅を基準に補正が復帰する
 
 
 def test_reenabling_drops_stale_width_reference():
@@ -489,11 +452,8 @@ def test_reenabling_drops_stale_width_reference():
   別の幅の道路で ON に戻すと、それを構造変化と誤認して幅急変ガードが誤発動し、
   ON にした直後 (= 効きを確かめたい場面) だけ補正が出ない。
   """
-  narrow = _model(left=-1.5, right=1.5)                 # 幅 3.0m
-  widened = _model(left=-1.5, right=2.5, path_std=0.6)  # 幅 4.0m
   _write_params()
-  c = LaneCenteringController()
-  _feed(c, narrow, 200, authority=1.0)
+  c = _settled_on_narrow()
   assert c._width_ref == pytest.approx(3.0, abs=0.05)
 
   lcp.write(lcp.KEY_ENABLED, False)
@@ -505,7 +465,7 @@ def test_reenabling_drops_stale_width_reference():
   c.update_params()
   assert c._width_ref == 0.0                            # ON に戻すときに捨てる
 
-  assert _feed(c, widened, 300, authority=1.0) > 0.0    # 新しい幅で素直に効く
+  assert _feed(c, _widened(), 300, authority=1.0) > 0.0   # 新しい幅で素直に効く
 
 
 def test_staying_enabled_keeps_width_reference():
@@ -513,16 +473,13 @@ def test_staying_enabled_keeps_width_reference():
 
   update_params() は 1Hz で回るので、ここで毎回捨てると幅急変ガードが恒久的に死ぬ。
   """
-  narrow = _model(left=-1.5, right=1.5)
-  widened = _model(left=-1.5, right=2.5, path_std=0.6)
   _write_params()
-  c = LaneCenteringController()
-  _feed(c, narrow, 200, authority=1.0)
+  c = _settled_on_narrow()
   ref = c._width_ref
 
   c.update_params()                                     # ON → ON
   assert c._width_ref == ref
-  assert abs(_feed(c, widened, 50, authority=1.0)) < 1e-9   # ガードは生きている
+  assert abs(_feed(c, _widened(), 50, authority=1.0)) < 1e-9   # ガードは生きている
 
 
 # ── controlsd から呼ばれる入口 (apply) ──────────────────────────────────

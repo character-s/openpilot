@@ -28,21 +28,14 @@ def param_dir(tmp_path, monkeypatch):
 def test_the_save_location_is_outside_openpilot_params():
   """⚠⚠ 保存先が `/data/params` の中に**無い**こと。
 
-  `common/params.cc` の `clearAll` は **ホワイトリストに無いファイルを無条件に unlink** し、
-  `system/manager/manager.py` が manager 起動のたびにそれを 4 回呼ぶ。ホワイトリストの実体は
-  `libparams_c.so` に焼かれた表で、sunnypilot の release 配布はビルド定義 (SConstruct /
-  SConscript) を落としているため、fork が `common/params_keys.h` にキーを足しても c4 では
-  **`.so` が古いまま = 載らない**。⇒ `/data/params/d` に置くと **manager が起動するたびに消える**。
-  c4 は ACC 連動で毎回コールドブートするので、エンジンをかけるたびに設定が既定値へ戻っていた。
-
-  ⚠ ここを `/data/params/...` に戻すと同じ症状が再発する。機械で固定しておく。
+  ⚠ `/data/params/` に戻すと `clearAll` に毎ブート消される (機序は lcp モジュール docstring)。機械で固定しておく。
   """
   assert not lcp.PARAM_DIR.startswith('/data/params/')
   assert lcp.PARAM_DIR.startswith('/data/')
 
 
-def test_temp_and_lock_stay_inside_the_save_location():
-  """tmp と `.lock` の置き場所が保存先の中に収まっていること。
+def test_temp_stays_inside_the_save_location():
+  """tmp の置き場所が保存先の中に収まっていること。
 
   ⚠ `_write_file` は tmp を `os.path.dirname(PARAM_DIR)` に作る (params.cc と同じ作法で、
   `d/` の中に作ると列挙にゴミが混じるため)。**保存先を動かすと tmp の置き場所も一緒に動く**ので、
@@ -121,6 +114,8 @@ def test_bool_round_trip_via_file(param_dir, value):
 
 @pytest.mark.parametrize("value", [-0.3, -0.1, 0.0, 0.25, 1.0])
 def test_float_round_trip_via_file(param_dir, value):
+  """書いた直後に読むと新しい値が返ること (書きが fsync + rename の同期だから成り立つ。
+  Params の put() に任せると非同期キューに載り、UI の表示と controlsd の 1Hz 読みが食い違う)。"""
   assert lcp.write(lcp.KEY_OFFSET, value)
   assert lcp.read_float(lcp.KEY_OFFSET) == pytest.approx(value)
 
@@ -130,7 +125,7 @@ def test_bool_key_uses_key_type_not_value_type(param_dir, falsy):
   """bool キーは**キーの型**で判定すること。値の型で分岐してはいけない。
 
   `isinstance(value, bool)` で分岐すると、bool でない偽値 (int の 0 など) が float 扱いになって
-  `"0.00"` が書かれる。読み戻すと `as_bool(b"0.00")` は「'0' と等しくない」ので **True** になり、
+  `"0.00"` が書かれる。読み戻すと `read_bool` は「'0' と等しくない」ので **True** になり、
   C++ の get_bool も同じ判定なので Params 経由でも同じ ⇒ OFF にしたつもりが ON になる。
   """
   assert lcp.write(lcp.KEY_ENABLED, falsy)
@@ -140,6 +135,7 @@ def test_bool_key_uses_key_type_not_value_type(param_dir, falsy):
 
 @pytest.mark.parametrize("truthy", [True, 1, 0.5])
 def test_bool_key_accepts_non_bool_truthy(param_dir, truthy):
+  """書式は C++ 側 get_bool の判定 ('0' 以外は真) に揃えて '1' / '0' で書く。"""
   assert lcp.write(lcp.KEY_ENABLED, truthy)
   assert (param_dir / lcp.KEY_ENABLED).read_bytes() == b"1"
   assert lcp.read_bool(lcp.KEY_ENABLED) is True
@@ -148,34 +144,18 @@ def test_bool_key_accepts_non_bool_truthy(param_dir, truthy):
 def test_write_never_goes_through_params(param_dir):
   """書きは必ずファイル経路であること (Params は受け取りもしない)。
 
-  ⚠ Params の put() は既定が block=False で、直後にファイルが更新されている保証がない
-  (2026-08-26 実機)。書けたと言った直後に controlsd が古い値を読む状態を作らないため、
-  書きは _write_file 一本に固定してある。引数として Params を渡せないことで担保する。
+  ⚠ Params の put() は直後にファイルが更新されている保証がない (理由は `lcp.write()` の docstring)。
+  引数として Params を渡せないことで担保する。
   """
   with pytest.raises(TypeError):
     lcp.write(lcp.KEY_ENABLED, True, object())
 
 
-def test_float_key_is_not_coerced_to_bool(param_dir):
-  """逆向き: float キーに 0.0 を書いても bool の '0' にはしないこと。"""
-  assert lcp.write(lcp.KEY_OFFSET, 0.0)
-  assert (param_dir / lcp.KEY_OFFSET).read_bytes() == b"0.0"
-
-
-def test_written_bool_is_readable_by_the_c_params_convention(param_dir):
-  """C++ 側の get_bool は '0' 以外を真と見るので、書式もそれに揃える。"""
-  lcp.write(lcp.KEY_ENABLED, True)
-  assert (param_dir / lcp.KEY_ENABLED).read_bytes() == b"1"
-  lcp.write(lcp.KEY_ENABLED, False)
-  assert (param_dir / lcp.KEY_ENABLED).read_bytes() == b"0"
-
-
 def test_read_takes_no_params_argument():
   """読みは Params を経由しない — 引数として渡せもしないこと。
 
-  ⚠⚠ `.so` が焼かれた端末では `Params.get(key, return_default=True)` が**必ず**既定値を返す。
-  Params を先に見る実装だとそこでファイルの値が黙って無視され、**端末によって挙動が変わる**。
-  今回の「毎ブート消える」と同じ種類の再発なので、受け取れないことで担保する。
+  ⚠⚠ Params を先に見るとファイルの値が黙って無視され、端末によって挙動が変わる (理由は lcp モジュール docstring)。
+  受け取れないことで担保する。
   """
   with pytest.raises(TypeError):
     lcp.read(lcp.KEY_OFFSET, object())
@@ -185,23 +165,12 @@ def test_read_takes_no_params_argument():
     lcp.read_float(lcp.KEY_OFFSET, object())
 
 
-def test_write_then_read_is_immediately_consistent(param_dir):
-  """書いた直後に読むと必ず新しい値が返ること。
-
-  ⚠ これが成り立つのは書きが同期 (fsync + rename) だから。Params の put() に任せると
-  非同期キューに載って、直後の読みが古い値を返しうる。UI は「書けたら表示を更新」し、
-  controlsd は 1Hz で読むので、ここがズレると画面と制御が食い違う。
-  """
-  for value in (-0.3, 0.0, 0.25):
-    assert lcp.write(lcp.KEY_OFFSET, value)
-    assert lcp.read_float(lcp.KEY_OFFSET) == pytest.approx(value)
-
-
 def test_float_is_written_without_losing_precision(param_dir):
   """repr 書式なので選択肢を細かくしても丸まらないこと。
 
   ⚠ f"{v:.2f}" だと 0.125 が "0.12" になり、書いた値と読み戻した値が一致しなくなる。
   焼いた Params が書く表現 (0.25 -> "0.25", 0.0 -> "0.0") とも揃う。
+  ⚠ float キーに 0.0 を書いても bool の '0' にはしないこと (書式はキーの型で決まる)。
   """
   for value in (0.125, -0.075, 0.3333):
     assert lcp.write(lcp.KEY_OFFSET, value)
@@ -277,7 +246,7 @@ def test_first_write_creates_the_save_location(tmp_path, monkeypatch):
   assert not fresh.exists()
   assert lcp.write(lcp.KEY_OFFSET, 0.1)
   assert (fresh / lcp.KEY_OFFSET).read_bytes() == b"0.1"
-  # ⚠ tmp と .lock は `d` の親に作るので、親も一緒に出来ていること
+  # ⚠ tmp は `d` の親に作るので、親も一緒に出来ていること
   assert fresh.parent.is_dir()
 
 

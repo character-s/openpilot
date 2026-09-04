@@ -42,15 +42,6 @@ class Parser:
       raise ValueError(f"Missing output {name}")
     return name not in outs
 
-  def is_mhp(self, outs, name, shape):
-    # MHP (multi-hypothesis) か単一 (mu+std) かを出力サイズで自動判定
-    # (stock modeld parity: deep_rl3+ の plan/lead は単一 990/144 要素)
-    if name not in outs:
-      return False
-    if outs[name].shape[1] == 2 * shape:
-      return False
-    return True
-
   def parse_categorical_crossentropy(self, name, outs, out_shape=None):
     if self.check_missing(outs, name):
       return

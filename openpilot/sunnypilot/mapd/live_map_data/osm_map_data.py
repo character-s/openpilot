@@ -34,11 +34,9 @@ class OsmMapData(BaseMapData):
     params = {
       "latitude": self.last_position.latitude,
       "longitude": self.last_position.longitude,
-      # PLN-1_3 (2026-08-08): we keep rewriting the last known fix while the localizer is invalid, so
-      # consumers (mapd, SmartCruiseControlMap) had no way to tell a fresh fix from a 36 s cold
-      # start pointing at the middle of the Pacific. Stamp both so they can refuse to use it.
+      # PLN-1_3: stamped so consumers (map_controller.position_from_param) can reject a stale/invalid fix.
       "valid": bool(self.localizer_valid),
-      # a wall clock is the point here: consumers compare this against their own now() to age the fix
+      # wall clock on purpose: consumers age this against their own now()
       "unixMillis": int(time.time() * 1e3),  # noqa: TID251
     }
 
