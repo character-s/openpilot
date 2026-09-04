@@ -119,13 +119,13 @@ class CarInterface(CarInterfaceBase):
     # to a negative value, so it won't matter.
     ret.minEnableSpeed = -1. if stop_and_go else MIN_ACC_SPEED
 
-    # LEXUS_GS_F (TSS-P) stop tuning: apply TSS2 stopping params so approach-to-stop is
-    # smooth instead of the coarse default (creep past line, then late hard brake). 2026-07-12
+    # LEXUS_GS_F (TSS-P) stop tuning. 2026-07-12
     if candidate == CAR.LEXUS_GS_F:
-      # vEgoStarting / stoppingDecelRate are read via CP.deprecated in longcontrol.py
-      # (the stop threshold itself lives in drive_helpers.should_stop = PLN-1_5)
+      # vEgoStarting is read via CP.deprecated in longcontrol.py (the gas-launch escape releases
+      # the stopping hold once the driver pulls away). The stop threshold itself lives in
+      # drive_helpers.should_stop (PLN-1_5), and the stopping ramp is a constant in longcontrol
+      # since 2026-09-04 - stoppingDecelRate is no longer read by anything.
       ret.deprecated.vEgoStarting = 0.25
-      ret.deprecated.stoppingDecelRate = 0.2
       ret.longitudinalActuatorDelay = 0.05  # hybrid quick response
 
     if ret.flags & ToyotaFlags.TSS2:
