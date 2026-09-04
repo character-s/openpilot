@@ -111,9 +111,12 @@ class LongControl:
         output_accel = min(output_accel, 0.0)
         # GS 450h stationary-SET patch (2026-07-07): when already at standstill there is
         # nothing to stop smoothly - ramp fast to hold force so creep does not move the car
-        # (stock stoppingDecelRate=0.8 takes 2.5s to reach stopAccel=-2.0; 5.0 takes 0.4s)
-        # NOTE: upstream switched to a flat 1.0 here; we keep CP.stoppingDecelRate (GS = 0.2/0.3)
-        decel_rate = 5.0 if CS.standstill else self.CP.deprecated.stoppingDecelRate
+        # (0.2 took 10s to reach stopAccel=-2.0; 5.0 takes 0.4s)
+        # Moving: upstream's flat 1.0 (2026-09-04, was CP.deprecated.stoppingDecelRate = 0.2).
+        # Measured over 2.3h / 41 stops: entry accel is p50 -0.30, so this costs 0.34s / 5cm at
+        # the median, but it cuts the shallow tail (a0 -0.15 took 1.75s / 48cm to stop) which is
+        # the dawdle the driver feels. Numbers from _e2e_accel_ceiling.py --ramp.
+        decel_rate = 5.0 if CS.standstill else 1.0
         output_accel -= decel_rate * DT_CTRL  # m/s^2/s while trying to stop
       self.reset()
 
