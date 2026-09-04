@@ -46,23 +46,21 @@ class TogglesLayoutMici(NavScroller):
     self._personality_toggle = BigMultiParamToggle("driving personality", "LongitudinalPersonality", ["aggressive", "standard", "relaxed"])
     self._experimental_btn = BigToggle("experimental mode", initial_state=ui_state.params.get_bool("ExperimentalMode"),
                                        toggle_callback=self._on_experimental_mode)
-    # DEC は experimental mode の中で「ACC と e2e のどちらを使うか」をモデルに選ばせる設定。
-    # 旧 UI (sunnypilot/layouts/settings/cruise.py) にしかなく、c4 では sunnylink を開く以外に
-    # 切り替える手段が無かった。実走 A/B (FULL e2e = DEC OFF) で頻繁に触るのでここに出す。
+    # DEC (experimental mode の中で ACC と e2e のどちらを使うかをモデルに選ばせる設定) は旧 UI にしか無く、
+    # c4 では切り替える手段が無かったのでここに出す。exp との連動は下の set_enabled を参照。
     self._dec_toggle = BigParamControl("dynamic experimental control", "DynamicExperimentalControl")
-    # Lane Centering (StarPilot 由来の幾何補正、08-26 移植)。⚠ この 4 つは openpilot の Params
-    # ではなく `/data/params_fork/d` に保存している — params に置くと `clearAll` のホワイトリスト
-    # から外れて manager 起動のたびに消えるため。読み書きは lane_centering_params が持つ。
+    # Lane Centering (StarPilot 由来の幾何補正)。⚠ この 4 つは openpilot の Params ではなく
+    # `/data/params_fork/d` に保存している — params に置くと `clearAll` のホワイトリストから外れて
+    # manager 起動のたびに消えるため。読み書きは lane_centering_params が持つ。
     # ⚠ 横制御なので DEC/exp の縦制御ゲートには連動させない。
     self._lane_centering_toggle = LaneCenteringToggle("lane centering", lcp.KEY_ENABLED)
     # 詳細 3 つは親が ON のときだけ出す。⚠ callable を渡すのは、親を押した瞬間に出したいため
     # (_update_toggles は show_event と engaged 遷移でしか回らない)。
-    self._lane_center_offset = LaneCenteringChoice("center offset", lcp.KEY_OFFSET,
-                                                   lcp.OFFSET_CHOICES, lcp.offset_label)
-    self._lane_center_authority = LaneCenteringChoice("yield to model", lcp.KEY_AUTHORITY,
-                                                      lcp.AUTHORITY_CHOICES, lcp.authority_label)
-    self._lane_center_pause = LaneCenteringToggle("pause on signal", lcp.KEY_PAUSE_ON_SIGNAL)
-    self._lane_centering_details = (self._lane_center_offset, self._lane_center_authority, self._lane_center_pause)
+    self._lane_centering_details = (
+      LaneCenteringChoice("center offset", lcp.KEY_OFFSET, lcp.OFFSET_CHOICES, lcp.offset_label),
+      LaneCenteringChoice("yield to model", lcp.KEY_AUTHORITY, lcp.AUTHORITY_CHOICES, lcp.authority_label),
+      LaneCenteringToggle("pause on signal", lcp.KEY_PAUSE_ON_SIGNAL),
+    )
     for item in self._lane_centering_details:
       item.set_visible(lambda: self._lane_centering_toggle._checked)
     is_metric_toggle = BigParamControl("use metric units", "IsMetric")
@@ -98,11 +96,9 @@ class TogglesLayoutMici(NavScroller):
       ("OpenpilotEnabledToggle", enable_openpilot),
     )
 
-    # DEC は exp モードの中で「ACC と e2e のどちらを使うか」をモデルに選ばせる設定なので、exp OFF では
-    # planner が判定ごと捨てる (longitudinal_planner.py の `experimental_mode and dec.mode() == "blended"`)。
-    # 押せてしまうと「ON にしたのに何も起きない」状態を作れてしまうので、exp に連動して灰色にする。
-    # 参照先を param ではなく exp トグルの表示状態にしているのは、毎フレーム param を読まずに済み、かつ
-    # 確認ダイアログが未確定の間は False のまま = 画面の見た目と必ず一致するため。
+    # exp OFF では planner が DEC を見ない (longitudinal_planner.py) ので、ON にできないよう灰色にする。
+    # param でなくトグルの表示状態を見るのは、毎フレーム param を読まずに済み、かつ確認ダイアログ
+    # 未確定の間も見た目と一致するため。
     self._dec_toggle.set_enabled(lambda: self._experimental_btn._checked)
     enable_openpilot.set_enabled(lambda: not ui_state.engaged)
     record_front.set_enabled(False if ui_state.params.get_bool("RecordFrontLock") else (lambda: not ui_state.engaged))
@@ -135,7 +131,6 @@ class TogglesLayoutMici(NavScroller):
       if ui_state.has_longitudinal_control:
         self._experimental_btn.set_visible(True)
         self._personality_toggle.set_visible(True)
-        # DEC は experimental mode の中の選択なので、exp と同じ縦制御ゲートに従わせる
         self._dec_toggle.set_visible(True)
       else:
         # no long for now

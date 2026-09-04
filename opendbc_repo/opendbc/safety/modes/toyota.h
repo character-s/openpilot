@@ -230,16 +230,9 @@ static bool toyota_tx_hook(const CANPacket_t *msg) {
     .has_steer_req_tolerance = true,
   };
 
-  // LEXUS_GS_F raised limits (Stage 5, 2026-07-17): ERROR_MAX 900 + DELTA_DOWN 40 (faster unwind for
-  // low-speed overshoot; EPS 1500 hard limit confirmed, max_torque stays upper bound). DELTA_UP <= 25.
-  //
-  // Stage 8 (2026-08-03): rate_down 40 -> 50 as an *upper bound only*. The car side now picks the
-  // unwind rate per torque band (opendbc/car/toyota/values.py: STEER_DELTA_DOWN 45, _FAST 50 below
-  // |torque| 500) because the real ceiling is EPS tracking, not the delta value: a 50 run showed
-  // 5728 clipped frames pass cleanly while the 3 faults all landed at |torque| 741/1416/1494 with
-  // the command-vs-measured gap hitting STEER_ERROR_MAX. panda must permit the widest value the
-  // car side can emit, so it carries 50 while the car side stays conservative where it matters.
-  // max_rt_delta: 100Hz x 250ms = 25 frames x 50 (rate_down) = 1250, +20% buffer = 1500
+  // LEXUS_GS_F (RAISED_STEER_LIMITS): upper bounds only - the car side (values.py) picks the unwind rate per
+  // torque band (45 / 50 below |torque| 500) and must never exceed these; CI pins car <= panda
+  // (test_car_side_never_exceeds_panda_side). max_rt_delta: 25 frames x 50 = 1250, +20% buffer = 1500.
   const TorqueSteeringLimits TOYOTA_GS_F_TORQUE_STEERING_LIMITS = {
     .max_torque = 1800,
     .max_rate_up = 25,

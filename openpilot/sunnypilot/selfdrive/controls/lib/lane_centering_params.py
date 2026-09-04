@@ -23,7 +23,7 @@ manager 起動のたびに `clear_all` を 4 回呼ぶ。sunnypilot の release 
 噛み合わないと import 時に params が全滅 = manager 起動不能になりうる)。
 
 `/data/params_fork` という名前は `/data/params` の**隣に並べて関係を示す**ため。中の構造も
-params と同じ (`d/` に値、その親に `.lock` と `.tmp_value_*`) にしてあるので、将来 params 本体へ
+params と同じ (`d/` に値、その親に `.tmp_value_*`) にしてあるので、将来 params 本体へ
 戻すときは `d/` の中身をそのまま移せる。fork が今後足す設定もここに置けばよい。
 
 ⚠ **代償**: params の `BACKUP` フラグに乗らないので端末初期化時の自動復元が効かない。4 項目を
@@ -43,11 +43,6 @@ cereal (→ opendbc submodule) を経由しないと import できない状態�
 """
 import os
 import tempfile
-
-try:
-  import fcntl
-except ImportError:      # Windows (PC 側の単体テスト)
-  fcntl = None
 
 # 値の実体。⚠⚠ **`/data/params` の外であることが要**。中に置くと manager 起動のたびに
 # `clearAll` に消される (モジュール docstring 参照)。
@@ -95,35 +90,10 @@ def authority_label(v: float) -> str:
   return f"{int(round(v * 100))}%"
 
 
-def as_bool(v, default):
-  if v is None:
-    return default
-  if isinstance(v, bool):
-    return v
-  if isinstance(v, (bytes, bytearray)):
-    return v.strip() not in (b'', b'0')
-  if isinstance(v, str):
-    return v.strip() not in ('', '0')
-  return bool(v)
-
-
-def as_float(v, default):
-  if v is None:
-    return default
-  try:
-    if isinstance(v, (bytes, bytearray)):
-      return float(v.decode('utf-8').strip())
-    return float(v)
-  except (TypeError, ValueError, UnicodeDecodeError):
-    return default
-
-
 def read(key):
-  """値のファイルを読む。無ければ (= まだ一度も書かれていなければ) None。
+  """値のファイルを読む (bytes)。無ければ (= まだ一度も書かれていなければ) None。
 
-  ⚠ **Params は経由しない — 引数として受け取りもしない**。`.so` が焼かれた端末では
-  `Params.get(key, return_default=True)` が**必ず**既定値を返すので、Params を先に見ると
-  ファイルの値が黙って無視される。詳細はモジュール docstring。
+  ⚠ **Params は経由しない — 引数として受け取りもしない** (理由 = モジュール docstring)。
   """
   try:
     with open(os.path.join(PARAM_DIR, key), 'rb') as f:
@@ -133,28 +103,36 @@ def read(key):
 
 
 def read_bool(key):
-  return as_bool(read(key), DEFAULTS[key])
+  default = DEFAULTS[key]
+  raw = read(key)
+  # C++ の get_bool と同じ「'0' 以外は真」
+  return default if raw is None else raw.strip() not in (b'', b'0')
 
 
 def read_float(key):
-  return as_float(read(key), DEFAULTS[key])
+  default = DEFAULTS[key]
+  raw = read(key)
+  if raw is None:
+    return default
+  try:
+    return float(raw)   # float() は bytes を受け付け前後の空白も無視する
+  except ValueError:
+    return default
 
 
 def _write_file(key, text: str) -> bool:
-  """`common/params.cc` の putParam と同じ手順でファイルを差し替える。
+  """`common/params.cc` の putParam と同じ手順 (tmp に書く → fsync → rename → 親 dir を fsync) で差し替える。
 
-  tmp に書く → fsync → `.lock` を取る → rename → 親 dir を fsync。⚠ 手順を守るのは
-  **controlsd が 1Hz でこのファイルを読んでいる**ため。普通に open('w') すると truncate と
-  write の間に読まれて「空 = 既定値」に落ちる瞬間があり、走行中に補正が一瞬切れる。
-  ⚠ tmp は `d/` の**外**に作る (params.cc と同じ作法)。`d/` 内に作ると列挙にゴミが混じる。
-  ⚠ tmp と `.lock` の置き場所は `PARAM_DIR` の親なので、**`PARAM_DIR` を変えると一緒に動く**。
-  `/data/params_fork/d` なら親は `/data/params_fork` = 保存先の中に収まる (`/data` を汚さない)。
+  ⚠ 手順を守るのは **controlsd が 1Hz でこのファイルを読んでいる**ため。普通に open('w') すると
+  truncate と write の間に読まれて「空 = 既定値」に落ちる瞬間がある。rename は atomic なので lock は要らない
+  (書き手は UI 1 本、controlsd は読むだけ)。
+  ⚠ tmp は `d/` の**外** (= `PARAM_DIR` の親) に作る。`d/` 内に作ると列挙にゴミが混じる。
   """
   key_path = os.path.join(PARAM_DIR, key)
   parent = os.path.dirname(PARAM_DIR) or '.'
   # ⚠ makedirs も mkstemp も try の中で。書けない端末があり (PC 側の replay など)、外に出すと
   #   OSError が UI まで抜けて設定画面が落ちる。
-  tmp_fd, tmp_path, lock_fd = None, None, None
+  tmp_fd, tmp_path = None, None
   try:
     # ⚠ `/data/params` と違って openpilot の誰も作ってくれないので、最初の書き込みで作る。
     #   読み側は「無ければ既定値」で動くので、作るのは書きのときだけでよい。
@@ -164,16 +142,6 @@ def _write_file(key, text: str) -> bool:
     os.fsync(tmp_fd)
     os.close(tmp_fd)
     tmp_fd = None
-
-    # C++ 側と同じ `.lock` を取ってから差し替える (同時書き込みの取りこぼし防止)
-    if fcntl is not None:
-      try:
-        lock_fd = os.open(os.path.join(parent, '.lock'), os.O_CREAT | os.O_RDWR, 0o666)
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-      except OSError:
-        if lock_fd is not None:
-          os.close(lock_fd)
-        lock_fd = None
 
     os.replace(tmp_path, key_path)
     tmp_path = None
@@ -197,29 +165,15 @@ def _write_file(key, text: str) -> bool:
         os.unlink(tmp_path)
       except OSError:
         pass
-    if lock_fd is not None:
-      try:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-      finally:
-        os.close(lock_fd)
 
 
 def write(key, value) -> bool:
-  """`PARAM_DIR/<key>` へ直接書く。成功したら True。
+  """`PARAM_DIR/<key>` へ tmp → fsync → rename で同期的に書く。成功したら True (UI はこれで表示を戻す)。
 
-  ⚠⚠ **Params 経由にしない (引数として受け取りもしない)**。`put()` / `put_bool()` は既定が
-  `block=False` で、**呼んだ直後にファイルが更新されている保証がない** (2026-08-26 に .so を焼いた
-  c4 で実測: `put(-0.2)` の直後はファイルが前の値のまま、次の `put(0.1, block=True)` でようやく
-  `-0.2` が現れた = block=True を付けても 1 つズレる)。UI は「書けたときだけ表示を更新する」ので、
-  書けたと言った直後に controlsd が古い値を読む状態を作れてしまう。⇒ 書きは `_write_file`
-  (tmp → fsync → rename) 一本にして、**返ったときには必ずファイルが新しい**状態にする。
-
-  ⚠ bool か float かは **キーの型 (`DEFAULTS`) で決める。渡された値の型で決めてはいけない**。
-  `isinstance(value, bool)` で分岐すると `write(KEY_ENABLED, 0)` のような bool でない偽値が
-  float 扱いになって `"0.00"` が書かれ、読み戻しは `as_bool(b"0.00")` = **True** になる
-  (C++ の `get_bool` も「'0' 以外は真」なので同じ) ⇒ **OFF にしたつもりが ON**。
-
-  ⚠ float の書式は `repr()`。`f"{v:.2f}"` だと選択肢を細かくしたとき黙って丸まる。
+  ⚠ Params は経由しない (理由 = モジュール docstring)。put() は block=False 既定で直後の読みが古い値を
+    返しうる (block=True でも 1 つズレる)。
+  ⚠ bool/float は値の型でなくキーの型 (DEFAULTS) で決める — write(KEY_ENABLED, 0) が "0.0" になると読み戻しが True。
+  ⚠ float は repr() (":.2f" は選択肢を細かくしたとき黙って丸まる)。
   """
   if isinstance(DEFAULTS.get(key), bool):
     text = '1' if value else '0'

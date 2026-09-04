@@ -28,12 +28,11 @@ TARGET_OFFSET = 1.0  # seconds - This controls how soon before the curve you rea
                      # time than specified depending on how much of a speed differential there is between v_ego and the
                      # target velocity.
 
-# GS450h PLN-1_3 hygiene patch (2026-08-08, see the "20 km/h disease" analysis):
-# mapd hands us targets computed from hand-drawn OSM node jitter, and it does so even while the
-# localizer has no fix at all - 58 % of route 39's turning samples were produced while
-# LastGPSPosition was still (0, 0) or 5 km off after a cold start. Two guards below:
+# GS450h PLN-1_3: mapd hands us targets computed from hand-drawn OSM node jitter, and it does so even
+# while the localizer has no fix at all (LastGPSPosition still (0, 0) or km off after a cold start).
+# Two guards below:
 #   * GPS_STALE_S: drop every target unless the fix behind it is fresh and flagged valid.
-#   * V_TARGET_REJECT: a sub-15 km/h "curve" on a Japanese city street is node noise, not a curve.
+#   * V_TARGET_REJECT: a sub-15 km/h "curve" on a city street is node noise, not a curve.
 #     Rejecting it is honest; the old max(v_target, MIN_V) clip merely repainted every bogus
 #     target as a plausible-looking 20.0 km/h, which is what hid the bug for so long.
 GPS_STALE_S = 2.0
@@ -43,9 +42,9 @@ V_TARGET_REJECT = 15 * CV.KPH_TO_MS
 def position_from_param(param: str, params: Params) -> tuple[Coordinate | None, bool]:
   """Read LastGPSPosition and report whether it can be trusted.
 
-  osm_map_data keeps rewriting the last known fix while the localizer is invalid, so a plain
-  coordinate read cannot tell a fresh fix from a 36 s cold start. It now also stores "valid" and
-  "unixMillis"; a payload without them is treated as untrusted rather than assumed good.
+  osm_map_data keeps rewriting the last known fix while the localizer is invalid, so a plain coordinate
+  read cannot tell a fresh fix from a cold start. It stamps "valid" and "unixMillis" (PLN-1_3); a payload
+  without them is treated as untrusted rather than assumed good.
   """
   raw = params.get(param)
   if not raw:
@@ -168,7 +167,7 @@ class SmartCruiseControlMap:
 
     self.target_velocities = velocities_from_param("MapTargetVelocities", self.mem_params) or []
 
-    if self.target_velocities is None:
+    if self.last_position is None or self.target_velocities is None:
       return
 
     min_dist = 1000
@@ -212,9 +211,6 @@ class SmartCruiseControlMap:
         a = 0.5 * TARGET_JERK
         b = self.a_ego
         c = self.v_ego - tv
-        # 2026-08-08: was "/ 2 * a", i.e. (...) / 2 * a instead of (...) / (2 * a). With
-        # a = 0.5 * TARGET_JERK = -0.3 that is a factor 11 too small, so max_d came out far too
-        # short and the controller decided "no need to slow down yet" until it was too late.
         t_a = -1 * ((b**2 - 4 * a * c) ** 0.5 + b) / (2 * a)
         t_b = ((b**2 - 4 * a * c) ** 0.5 - b) / (2 * a)
         if not isinstance(t_a, complex) and t_a > 0:

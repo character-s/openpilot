@@ -7,7 +7,6 @@ CONTROL_N = 17
 CAR_ROTATION_RADIUS = 0.0
 # This is a turn radius smaller than most cars can achieve
 MAX_CURVATURE = 0.2
-MAX_VEL_ERR = 5.0  # m/s
 MIN_STABLE_DELAY = 0.3
 
 # EU guidelines
@@ -17,8 +16,7 @@ MAX_LATERAL_ACCEL_NO_ROLL = 3.0  # m/s^2
 
 def should_stop(v_ego: float, a_target: float) -> bool:
   # GS450h PLN-1_5: 0.3 -> 0.4. CarParams.vEgoStopping is deprecated and no longer read by
-  # anything, so the TSS-P stop tuning (toyota/interface.py, vEgoStopping=0.4) silently
-  # stopped applying. This hardcode restores it; revisit if this fork ever runs another car.
+  # anything, so the stop threshold has to live here; revisit if this fork ever runs another car.
   return bool(v_ego < 0.4 and a_target < 0.1)
 
 def clamp(val, min_val, max_val):

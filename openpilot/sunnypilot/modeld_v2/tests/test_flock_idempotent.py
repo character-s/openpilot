@@ -10,11 +10,10 @@ from tinygrad.runtime.support.system import System
 class TestFlockIdempotent(OpenpilotTestCase):
   """`System.flock_acquire` が同じプロセスからの再取得で自分に弾かれないこと。
 
-  ⚠⚠ 08-30 の実車ハングの核心。flock は fd ではなく **open file description** 単位で排他する
+  ⚠⚠ 実車ハングの核心。flock は fd ではなく **open file description** 単位で排他する
   ので、同じプロセスが `os.open` をやり直して掛け直すと **自分自身が持っているロック**とぶつかる。
-  実測では 1 プロセスが 6 回 `flock_acquire` に来て成功は最初の 1 回だけ、残り 5 回は自分に
-  弾かれて fd を 5 個リークしていた。おかげで「デバイス初期化がなぜ失敗したのか」が毎回
-  「ロックが取れない」に化け、リトライは原理的に成功しない状態だった。
+  すると「デバイス初期化がなぜ失敗したのか」が毎回「ロックが取れない」に化け、リトライは
+  原理的に成功しない。
   """
 
   @staticmethod

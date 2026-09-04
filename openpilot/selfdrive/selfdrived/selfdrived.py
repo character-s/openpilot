@@ -205,10 +205,8 @@ class SelfdriveD(CruiseHelper):
     if self.big_model_loading and not loading:
       self.big_model_ready_t = time.monotonic()
     self.big_model_loading = loading
-    # GS450h: ロード完了後の warmup 窓 (all_checks() を抑止している間) も NO_ENTRY を維持する。
-    # ⚠ upstream はロード中しか出さないので、warmup の数秒だけ「安全チェックは死んでいるのに
-    #   engage を止めるものが何も無い」窓が開く。08-29 に 125km/h でここに入り、modelV2 も
-    #   liveParameters も 0 件のまま engage できて op_tq -1147 になった。
+    # GS450h: warmup 窓 (下で all_checks() を免除する間) も NO_ENTRY を維持する。upstream はロード中しか
+    # 出さず、その数秒は「チェック免除だけあって engage を止めるものが無い」穴になる (08-29 の事故)。
     warming_up = self.big_model_loading or time.monotonic() < self.big_model_ready_t + BIG_MODEL_WARMUP
     if warming_up:
       self.events.add(EventName.bigModelLoading)
@@ -447,14 +445,8 @@ class SelfdriveD(CruiseHelper):
     # generic catch-all. ideally, a more specific event should be added above instead
     has_disable_events = self.events.contains(ET.NO_ENTRY) and (self.events.contains(ET.SOFT_DISABLE) or self.events.contains(ET.IMMEDIATE_DISABLE))
     no_system_errors = (not has_disable_events) or (len(self.events) == num_events)
-    # GS450h: 免除するのは **engage していないとき** だけにする。
-    # ⚠ upstream はロード中〜完了 +warmup の間 all_checks() / posenet / paramsd の判定をまるごと
-    #   飛ばすが、"bigModelLoading" の NO_ENTRY はロード中しか出ない。その差分 (=warmup の窓) では
-    #   engage を止めるものが何も無いまま安全チェックだけが死んでいる。08-29 に実測:
-    #   modelV2 0 件 / liveParameters 0 件のまま 125km/h で engage でき、
-    #   VehicleModel が既定値のままなので error 30m/s^2 -> LatControl 飽和 -> op_tq -1147。
-    settling_window = self.big_model_loading or time.monotonic() < self.big_model_ready_t + BIG_MODEL_WARMUP
-    big_model_settling = settling_window and not self.enabled
+    # GS450h: 免除は非 engage 時だけ (engage 中まで免除すると上の warmup 窓と同じ穴が開く)
+    big_model_settling = warming_up and not self.enabled
     if not self.sm.all_checks() and no_system_errors and not big_model_settling:  # the load holds modelV2 and friends back on purpose
       if not self.sm.all_alive():
         self.events.add(EventName.commIssue)
