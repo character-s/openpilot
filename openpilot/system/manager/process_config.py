@@ -169,10 +169,8 @@ procs = [
 procs += [
   # Models
   PythonProcess("models_manager", "openpilot.sunnypilot.models.manager", only_offroad),
-  # GS450h: chestnut の GPU ハングで落ちたら manager に再起動させる。upstream は proc を
-  # 残したままにするので 1 走行まるごと無モデルになり、modelV2 が来ないまま engage できてしまう
-  # (08-29 実測: op_tq -1147)。プロセス再起動で am_usb の flock と tinygrad の状態が消えるため、
-  # 小モデルへ降格せず big のまま復帰できる。
+  # GS450h: chestnut の GPU ハングで落ちたら再起動させる (upstream 既定だと 1 走行まるごと無モデルのまま engage できてしまう)。
+  # 再起動で am_usb の flock と tinygrad 状態が消えるので小モデルへ降格せず big のまま復帰できる (ManagerProcess.reap_if_crashed)
   NativeProcess("modeld_tinygrad", "openpilot/sunnypilot/modeld_v2", ["./modeld"], and_(only_onroad, is_tinygrad_model), restart_on_crash=True),
 
   # Backup

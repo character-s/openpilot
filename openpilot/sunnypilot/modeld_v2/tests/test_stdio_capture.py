@@ -10,12 +10,7 @@ import openpilot.selfdrive.modeld.helpers as helpers
 
 
 class TestStdioCapture(OpenpilotTestCase):
-  """chestnut の GPU ハング時に、tinygrad が print する割り込み情報を拾えること。
-
-  ⚠ 08-30 に swaglog と journal を grep して `sq_intr` / `UTCL2` / `IH (` が 1 件も
-  無いことを確認した。GPU は落ちるたびに理由 (MEMVIOL / ILLEGAL_INST / EDC_FUE /
-  UTCL2_FAULT) を報告しているのに、その print がどこにも残っていなかった。
-  """
+  """chestnut の GPU ハング時に、tinygrad が print する割り込み情報を拾えること (機序は helpers._StdioTee の docstring)。"""
 
   def setUp(self):
     self._saved = (sys.stdout, sys.stderr, helpers._STDIO_RING, helpers.CRASH_DIR)
@@ -70,7 +65,8 @@ class TestStdioCapture(OpenpilotTestCase):
 
   def test_capture_stdio_never_raises(self):
     """落ちる寸前の保険が、modeld の起動を妨げてはいけない。"""
-    with mock.patch.object(helpers, "_StdioTee", side_effect=RuntimeError("boom")),          mock.patch.object(helpers.cloudlog, "exception"):
+    with (mock.patch.object(helpers, "_StdioTee", side_effect=RuntimeError("boom")),
+          mock.patch.object(helpers.cloudlog, "exception")):
       helpers.capture_stdio()
     self.assertIsNone(helpers._STDIO_RING)
 

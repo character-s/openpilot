@@ -29,19 +29,12 @@ _FINISH_LAT_ACC_TH = 1.1  # Lat Acc threshold to trigger the end of the turn cyc
 
 # Maximum lateral acceleration we are willing to carry through the turn, i.e. how fast
 # v_target = sqrt(a_lat / curvature) lets us take it.
-# GS450h PLN-1_1 (2026-08-08): this used to be a flat 2.0, which is far more conservative than
-# how this car is actually driven here. Measured over 23 seg of hill road (one logged route, SCC-V
-# replayed with archive/probes/_scc_replay.py --scan --assume-on): 59 interventions asking for a
-# median of 9 km/h BELOW the speed the driver actually took the same corner at. That constant
-# nagging is why SCC-V was switched off around 07-05 and stayed off for six weeks.
-# Relaxing it to a flat 3.0 removes the nagging (median gap +1.5 km/h) but also gives up the
-# corners that matter (5th pct gap -21.7 -> -14.2). Making it depend on how sharp the turn ahead
-# actually looks keeps both: measured median gap -2.4 km/h, 5th pct -22.2 km/h.
-# The top end is 2.6 rather than the comfort-book 2.0 on purpose. The corners that land there are
-# 6-8 s chains of bends on local prefectural mountain routes, taken at a near-constant
-# 43-49 km/h. Asking for 20 km/h is defensible on comfort grounds alone, but on a mountain road the
-# driver has already braced for the lateral load - it is expected, not a surprise - so applying a
-# flat comfort limit there is what made the feature feel like it was fighting the driver.
+# GS450h PLN-1_1: a flat 2.0 nagged constantly (median 9 km/h below the speed the driver took the same
+# corner at) and a flat 3.0 gave up the corners that matter, so the limit depends on how sharp the turn
+# ahead looks. The top end is 2.6 rather than the comfort-book 2.0 on purpose: the corners that land there
+# are long chains of bends where the driver has already braced for the lateral load, and a flat comfort
+# limit there is what made the feature feel like it was fighting the driver.
+# Tuned by replaying logged routes with archive/probes/_scc_replay.py.
 _A_LAT_REG_MAX_BP = [1.8, 2.4, 3.2]  # predicted lat acc ahead
 _A_LAT_REG_MAX_V = [3.2, 3.2, 2.6]  # lat acc allowed through the turn
 
@@ -49,18 +42,14 @@ _NO_OVERSHOOT_TIME_HORIZON = 4.  # s. Time to use for velocity desired based on 
 
 # Lookup table for the minimum smooth deceleration during the ENTERING state
 # depending on the actual maximum absolute lateral acceleration predicted on the turn ahead.
-# GS450h PLN-1_1 (2026-08-08): stock [-0.2, -1.] x [1.3, 3.] only asked for -0.2..-0.45 in the 1.3-2.0 band
-# that Japanese right-angle junctions produce, so the car coasted into the turn and the driver had
-# to brake (logged example, a right-angle rural junction: entering fired 4.4 s early, actual decel -0.1).
-# Verified offline with archive/probes/_scc_replay.py on that rlog: with SCC-V enabled the stock
-# setup reaches 33.9 km/h at the apex where the human took 30.9. This table on its own (against a
-# flat 2.0 limit) reaches 29.4; together with the curvature-dependent limit above it lands at 36.3,
-# i.e. slacker than stock right here. That is a deliberate trade the driver signed off on: 4 s out
-# this junction predicts only 1.58 m/s2, indistinguishable from a gentle bend, so buying it back
+# GS450h PLN-1_1: stock [-0.2, -1.] x [1.3, 3.] only asked for -0.2..-0.45 in the 1.3-2.0 band that
+# right-angle junctions produce, so the car coasted into the turn and the driver had to brake. Together
+# with the curvature-dependent limit above, such junctions still end up slacker than stock - a deliberate
+# trade: 4 s out they predict only ~1.6 m/s2, indistinguishable from a gentle bend, and buying them back
 # would cost the "stop nagging me everywhere else" the same knob is there to deliver.
 # Do NOT deepen the low end past ~-1.4: v_target = max(v_target, MIN_V) + a_target * 4 s goes
 # negative, the car keeps slowing, current lat acc never reaches _TURNING_LAT_ACC_TH and ENTERING
-# latches into a runaway (measured: -2.0 ends at 4 km/h without ever entering TURNING).
+# latches into a runaway (replayed with archive/probes/_scc_replay.py).
 _ENTERING_SMOOTH_DECEL_V = [-0.4, -1.2]  # min decel value allowed on ENTERING state
 _ENTERING_SMOOTH_DECEL_BP = [1.1, 2.5]  # absolute value of lat acc ahead
 

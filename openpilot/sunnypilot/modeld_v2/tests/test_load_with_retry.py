@@ -7,52 +7,64 @@ import openpilot.sunnypilot.modeld_v2.modeld as modeld
 LOCK_ERR = "Failed to acquire lock file am_usb:4-2.lock"
 
 
-class TestLoadWithRetry(OpenpilotTestCase):
-  """eGPU のロード失敗が「ロック競合」に化けて本当の理由を隠さないこと。
+def _lock_error() -> ExceptionGroup:
+  # shape of the error tinygrad raises when the am_usb flock is held by another process
+  return ExceptionGroup('No interface for AMD:0 is available',
+                        [FileNotFoundError(2, 'No such file or directory'), RuntimeError('no pcie'), RuntimeError(LOCK_ERR)])
 
-  ⚠ 08-30 実車: 10 連敗のログが全部 `lock holder = 自分自身` で、なぜ GPU を掴めなかったのかが
-  1 件も残っていなかった。tinygrad は候補インターフェースを順に試し、1 つ目でロックを取ったまま
-  失敗すると 2 つ目以降が自分の残したロックとぶつかるため。
-  """
+
+class TestLoadWithRetry(OpenpilotTestCase):
+  """eGPU のロード失敗が「ロック競合」に化けて本当の理由を隠さないこと (機序は modeld._load_with_retry の docstring)。"""
 
   def setUp(self):
-    for name in ("_egpu_lock_holder",):
-      p = mock.patch.object(modeld, name, return_value="nobody")
-      p.start()
-      self.addCleanup(p.stop)
+    p = mock.patch.object(modeld, "_egpu_lock_holder", return_value="nobody")
+    p.start()
+    self.addCleanup(p.stop)
     for name in ("warning", "error"):
       p = mock.patch.object(modeld.cloudlog, name)
       self.addCleanup(p.stop)
       setattr(self, f"log_{name}", p.start())
 
   def test_returns_model_on_success(self):
-    model, err = modeld._load_with_retry(lambda: "MODEL", attempts=3, wait=0)
-    self.assertEqual(model, "MODEL")
-    self.assertIsNone(err)
+    make_model = mock.Mock(return_value="MODEL")
+    model, err = modeld._load_with_retry(make_model, attempts=3, wait=0)
+    self.assertEqual((model, err), ("MODEL", None))
+    self.assertEqual(make_model.call_count, 1)
 
   def test_returns_first_error_not_last(self):
     """リトライ後の「ロックが取れない」ではなく、1 回目に起きたことを返す。"""
-    errs = [RuntimeError(f"real reason: gpu not responding ({LOCK_ERR})"), RuntimeError(LOCK_ERR)]
-
-    def make_model():
-      raise errs.pop(0) if len(errs) > 1 else errs[0]
-
+    make_model = mock.Mock(side_effect=[RuntimeError(f"real reason: gpu not responding ({LOCK_ERR})"),
+                                        RuntimeError(LOCK_ERR), RuntimeError(LOCK_ERR)])
     model, err = modeld._load_with_retry(make_model, attempts=3, wait=0)
     self.assertIsNone(model)
     self.assertIn("real reason", repr(err))
 
   def test_does_not_retry_when_not_lock_contention(self):
     """ロック競合でないなら 1 回で諦める (待っても状況は変わらない)。"""
-    calls = []
-
-    def make_model():
-      calls.append(1)
-      raise RuntimeError("gpu is on fire")
-
+    make_model = mock.Mock(side_effect=RuntimeError("gpu is on fire"))
     model, err = modeld._load_with_retry(make_model, attempts=5, wait=0)
     self.assertIsNone(model)
-    self.assertEqual(len(calls), 1)
+    self.assertEqual(make_model.call_count, 1)
     self.assertIn("on fire", repr(err))
+
+  def test_lock_contention_detected(self):
+    self.assertTrue(modeld._is_lock_contention(_lock_error()))
+    self.assertTrue(modeld._is_lock_contention(RuntimeError('Failed to acquire lock file am_usb:2-1.lock')))
+    self.assertFalse(modeld._is_lock_contention(RuntimeError('no pcie')))
+    self.assertFalse(modeld._is_lock_contention(RuntimeError("args mismatch in JIT: captured=(..., 'QCOM') expected=(..., 'AMD')")))
+
+  def test_gives_up_after_all_attempts(self):
+    make_model = mock.Mock(side_effect=_lock_error())
+    model, err = modeld._load_with_retry(make_model, wait=0)
+    self.assertIsNone(model)
+    self.assertEqual(make_model.call_count, modeld.EGPU_LOAD_ATTEMPTS)
+    self.assertTrue(modeld._is_lock_contention(err))
+
+  def test_success_after_contention(self):
+    make_model = mock.Mock(side_effect=[_lock_error(), _lock_error(), "MODEL"])
+    model, err = modeld._load_with_retry(make_model, wait=0)
+    self.assertEqual((model, err), ("MODEL", None))
+    self.assertEqual(make_model.call_count, 3)
 
   def test_logs_full_traceback_of_first_failure(self):
     """ExceptionGroup は repr だと 1 行に潰れるので、1 回目だけ traceback を残す。"""

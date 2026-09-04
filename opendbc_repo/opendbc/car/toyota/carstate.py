@@ -153,14 +153,13 @@ class CarState(CarStateBase, CarStateExt):
     if ret.cruiseState.speed != 0:
       conversion_factor = CV.KPH_TO_MS if is_metric else CV.MPH_TO_MS
       ret.cruiseState.speedCluster = cluster_set_speed * conversion_factor
-      # GS 450h (LEXUS_GS_F): UI_SET_SPEED is mph-valued but BODY_CONTROL_STATE_2.UNITS reports
-      # metric (IS firmware), so the cluster set speed is mis-converted (e.g. 30 mph shown as 30 km/h).
-      # cruiseState.speed (from DSU_CRUISE) is already correct km/h, so mirror it to the cluster.
+      # GS 450h (LEXUS_GS_F): UI_SET_SPEED is mph-valued but BODY_CONTROL_STATE_2.UNITS reports metric
+      # (IS firmware), so the cluster set speed is mis-converted. Mirror the correct km/h from DSU_CRUISE to
+      # the cluster, and turn the control target into true speed so "set = cluster reading" holds like
+      # stock (cluster reads 1.029*v + 2.5 km/h, measured at highway speed).
       if self.CP.carFingerprint == CAR.LEXUS_GS_F:
-        # 純正と同じ「set=メーター」: UI表示はSET_SPEED(メーター速度)のまま、
-        # 制御目標(speed)を実速度に変換(÷メーター上振れ係数1.075)してメーター読みをset値に合わせる
-        ret.cruiseState.speedCluster = ret.cruiseState.speed  # UI = メーター速度(設定値)
-        ret.cruiseState.speed = (ret.cruiseState.speed - 2.5 * CV.KPH_TO_MS) / 1.029  # 制御目標 = 実速 (メーター特性 1.029v+2.5km/h の逆変換。2026-07-12 高速実測で再較正)
+        ret.cruiseState.speedCluster = ret.cruiseState.speed
+        ret.cruiseState.speed = (ret.cruiseState.speed - 2.5 * CV.KPH_TO_MS) / 1.029
 
     if self.CP.flags & ToyotaFlags.TSS2 and not self.CP.flags & ToyotaFlags.DISABLE_RADAR.value:
       if not (self.CP_SP.flags & ToyotaFlagsSP.SMART_DSU.value):
