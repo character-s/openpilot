@@ -301,6 +301,21 @@ def test_pln1_5_stop_threshold_survives():
   assert 'PLN-1_5' in src, 'PLN-1_5 の由来コメントが消えている (なぜ 0.4 なのかが失われる)'
 
 
+def test_stopping_ramp_rates_survive():
+  """stopping 状態でブレーキを詰める速度。standstill だけ GS 独自 (5.0)、走行中は上流と同じ 1.0。
+
+  ⚠ 上流はここを `output_accel -= 1.0 * DT_CTRL` の 1 行で書くので、追従のたびに
+  standstill 分岐ごと消えやすい。消えるとホールド力が育たずクリープで動く (2026-07-07 の症状)。
+  ⚠ 走行中側を下げると停止直前の詰めが遅くなり「じりじり」が伸びる。2026-09-04 の実測
+  (2.3h / 41 停止) では 0.2 のとき突入 accel -0.15 の場面で 1.75s / 48cm かかっていた。
+  """
+  src = _read(LONGCONTROL_PY)
+  m = re.search(r'decel_rate\s*=\s*([0-9.]+)\s+if\s+CS\.standstill\s+else\s+([0-9.]+)', src)
+  assert m, 'longcontrol.py の stopping ランプが「standstill なら 5.0 / それ以外 1.0」の形でない'
+  assert float(m.group(1)) == 5.0, f'standstill のホールド詰めが {m.group(1)} (GS は 5.0)'
+  assert float(m.group(2)) == 1.0, f'走行中の詰めが {m.group(2)} (上流と同じ 1.0 が現行)'
+
+
 def test_stop_distance_matches_compiled_cost():
   """STOP_DISTANCE は **コンパイル時定数**。Python 側だけ変えても実機は変わらない。
 
