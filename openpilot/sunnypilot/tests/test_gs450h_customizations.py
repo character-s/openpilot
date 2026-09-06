@@ -356,11 +356,21 @@ def test_pln1_7_extra_stop_distance_survives():
 
 
 def test_scc_vision_curve_tuning_survives():
-  """SCC-V (PLN-1): カーブ手前の減速。実走で決めた曲率テーブル。"""
+  """SCC-V (PLN-1 / PLN-6): カーブ手前の減速。実走 rlog の replay で決めたテーブル。
+
+  ⚠⚠ **進入減速のテーブルは PLN-6 (09-06) で stock に戻した**。PLN-1_1 の形直しは撤回し、
+  GS の挙動は **`_ENTERING_DECEL_FLOOR` = -0.5 のクリップ 1 つ**に集約してある。
+  ⇒ **テーブルが stock 値でなくなったら、それは上流のリチューンなので歓迎 (この assert は残す)。
+    落ちてはいけないのはクリップの方**。曲率テーブル (`_A_LAT_REG_MAX`) は PLN-1_1 のまま。
+  根拠 = archive/probes/_scc_replay.py --scan / _acc_brake_threshold.py / _decel_source_mix.py
+  """
   assert _literal(SCC_VISION_PY, '_A_LAT_REG_MAX_BP') == [1.8, 2.4, 3.2]
   assert _literal(SCC_VISION_PY, '_A_LAT_REG_MAX_V') == [3.2, 3.2, 2.6]
-  assert _literal(SCC_VISION_PY, '_ENTERING_SMOOTH_DECEL_V') == [-0.4, -1.2]
-  assert _literal(SCC_VISION_PY, '_ENTERING_SMOOTH_DECEL_BP') == [1.1, 2.5]
+  assert _literal(SCC_VISION_PY, '_ENTERING_SMOOTH_DECEL_V') == [-0.2, -1.0]
+  assert _literal(SCC_VISION_PY, '_ENTERING_SMOOTH_DECEL_BP') == [1.3, 3.0]
+  assert _literal(SCC_VISION_PY, '_ENTERING_DECEL_FLOOR') == -0.5
+  assert re.search(r'max\(float\(a_target\),\s*_ENTERING_DECEL_FLOOR\)', _read(SCC_VISION_PY)), \
+    'ENTERING の減速に floor を当てる行が無い = 定数だけ載ってクリップが効いていない'
 
 
 def test_scc_map_gating_survives():
@@ -665,6 +675,19 @@ def test_pln1_8_e2e_path_floor_survives():
   assert _literal(LONG_PLANNER_PY, 'E2E_ACCEL_PATH_RC') == 0.15
   assert re.search(r'max\s*\(\s*min\s*\(\s*output_a_target_e2e\s*,.*E2E_ACCEL_PATH_FLOOR\s*\)', _read(LONG_PLANNER_PY)), \
     '経路 min を e2e 目標に当てる行が無い = 定数だけ載って補強が効いていない'
+
+
+def test_pln5_cruise_decel_floor_survives():
+  """PLN-5 (09-06): 巡航の減速要求を摩擦ブレーキに入らない深さ (-0.5) までに制限する。
+
+  上流の既定は -1.2。戻ると **設定速度を下げただけでブレーキを踏んで合わせに行く**挙動に戻り、
+  後続から見てブレーキランプが点く (ACC_BRAKING は aTarget -0.5 より深い帯で点灯率 1.000)。
+  ⚠ 本当に制動が要る場面 = 前車追従 (MPC 経路) と e2e はこの定数を通らないので、
+    ここを緩めても追従性能は変わらない。根拠 = archive/probes/_acc_brake_threshold.py
+  """
+  assert _literal(LONG_PLANNER_PY, 'A_CRUISE_MIN') == -0.5
+  assert re.search(r'np\.clip\(\s*v_cruise\s*-\s*v_ego\s*,\s*A_CRUISE_MIN\s*,', _read(LONG_PLANNER_PY)), \
+    '巡航の減速要求を A_CRUISE_MIN でクリップする行が無い = 定数だけ載っている'
 
 
 def test_carstate_gs_set_speed_and_precollision_timeout_survive():
