@@ -20,7 +20,17 @@ from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import Lon
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 J_CRUISE_VALS = [1.6, 1.2, 0.8, 0.6]
-A_CRUISE_MIN = -1.2
+# PLN-5 (2026-09-06): 巡航の減速要求は摩擦ブレーキに入らない深さまでにする (user 判断)。
+# a_cruise = clip(v_cruise - v_ego, A_CRUISE_MIN, max_accel) は設定速度との差 (m/s) をそのまま
+# 加速度 (m/s^2) にするので、設定を 10km/h 下げただけで即 -1.2 が立つ。GS 450h の回生では出ない
+# 深さなので摩擦ブレーキが入り、後続から見てブレーキランプが点く。
+# 実測 (09-05 route 045 の 9 seg、archive/probes/_acc_brake_threshold.py):
+#   PCM_CRUISE(466) の ACC_BRAKING は aTarget が -0.5 より深い全帯で点灯率 1.000、-0.3 より浅いと
+#   0.03 以下。UN R13-H は 0.7 m/s^2 以下での制動灯点灯を禁止しているので -0.5 なら灯火には
+#   出ない見込み (⚠ 実車での目視確認は未実施。点いていたら -0.3 に落とす)。
+# ⚠ 本当に制動が要る場面 = 前車追従 (MPC 経路) と e2e はこの定数を通らないので影響しない。
+#   下り坂の速度超過もここに含まれるが、user 判断で「ブレーキを踏むほどではない」= -0.5 のまま。
+A_CRUISE_MIN = -0.5
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5

@@ -50,8 +50,28 @@ _NO_OVERSHOOT_TIME_HORIZON = 4.  # s. Time to use for velocity desired based on 
 # Do NOT deepen the low end past ~-1.4: v_target = max(v_target, MIN_V) + a_target * 4 s goes
 # negative, the car keeps slowing, current lat acc never reaches _TURNING_LAT_ACC_TH and ENTERING
 # latches into a runaway (replayed with archive/probes/_scc_replay.py).
-_ENTERING_SMOOTH_DECEL_V = [-0.4, -1.2]  # min decel value allowed on ENTERING state
-_ENTERING_SMOOTH_DECEL_BP = [1.1, 2.5]  # absolute value of lat acc ahead
+# GS450h PLN-6 (2026-09-06): PLN-1_1's reshaped table above is WITHDRAWN - the table is stock again and
+# the GS behaviour is now one clip, _ENTERING_DECEL_FLOOR, applied to its output. Replaying a whole
+# 115-segment route (archive/probes/_scc_replay.py --scan) found 31 interventions, and only the 7
+# predicting >= 2.5 m/s2 ever constrained anything: each asked for 6 to 22 km/h below the speed the
+# driver had just carried through that same corner (worst: 70.3 -> 46.8 km/h, where the driver
+# cancelled). The other 24 never bit - their v_target sat above the current speed - so the deep end of
+# this table was the entire effect, and a floor is a more honest way to say that than a reshaped curve.
+# PLN-1_1's concern no longer reads the same way either: on that route (archive/probes/
+# _decel_source_mix.py) junction-band decel comes from e2e (43%) and lead following (43%), with SCC-V
+# active for only 8% of those frames - the junctions are being handled by the model now, not by us.
+# Keeping the table at stock also means an upstream retune of it survives a rebase untouched; only the
+# clip below is ours.
+_ENTERING_SMOOTH_DECEL_V = [-0.2, -1.0]  # min decel value allowed on ENTERING state (stock)
+_ENTERING_SMOOTH_DECEL_BP = [1.3, 3.0]  # absolute value of lat acc ahead (stock)
+
+# GS450h PLN-6: hard floor on the ENTERING deceleration. -0.5 m/s2 is where PCM_CRUISE.ACC_BRAKING
+# starts firing on every frame (measured over 9 segments with archive/probes/_acc_brake_threshold.py:
+# 1.000 for every band deeper than -0.5, 0.03 shallower than -0.3), and UN R13-H forbids the brake
+# lamps below 0.7 m/s2, so this keeps curve entry inside the regenerative band where nothing lights up.
+# Same number as A_CRUISE_MIN / PLN-5 in longitudinal_planner.py, on purpose.
+# NOTE: not yet confirmed by eye on the road - if the lamps do come on, drop this to -0.3.
+_ENTERING_DECEL_FLOOR = -0.5
 
 # Lookup table for the acceleration for the TURNING state
 # depending on the current lateral acceleration of the vehicle.
@@ -188,6 +208,8 @@ class SmartCruiseControlVision:
     elif self.state == VisionState.entering:
       # when not overshooting, target a smooth deceleration in preparation for a sharp turn to come.
       a_target = np.interp(self.max_pred_lat_acc, _ENTERING_SMOOTH_DECEL_BP, _ENTERING_SMOOTH_DECEL_V)
+      # GS450h PLN-6: never brake into a corner harder than the regenerative band (see the floor above).
+      a_target = max(float(a_target), _ENTERING_DECEL_FLOOR)
     # TURNING
     elif self.state == VisionState.turning:
       # When turning, we provide a target acceleration that is comfortable for the lateral acceleration felt.
