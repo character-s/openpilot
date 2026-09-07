@@ -42,6 +42,7 @@ MODELD_PY = 'openpilot/sunnypilot/modeld_v2/modeld.py'
 NNLC_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/nnlc/nnlc.py'
 TORQUE_EXT_BASE_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/latcontrol_torque_ext_base.py'
 SCC_VISION_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/smart_cruise_control/vision_controller.py'
+FETCHER_PY = 'openpilot/sunnypilot/models/fetcher.py'
 SCC_MAP_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/smart_cruise_control/map_controller.py'
 LC_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/lane_centering.py'
 LC_PARAMS_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/lane_centering_params.py'
@@ -371,6 +372,20 @@ def test_scc_vision_curve_tuning_survives():
   assert _literal(SCC_VISION_PY, '_ENTERING_DECEL_FLOOR') == -0.5
   assert re.search(r'max\(float\(a_target\),\s*_ENTERING_DECEL_FLOOR\)', _read(SCC_VISION_PY)), \
     'ENTERING の減速に floor を当てる行が無い = 定数だけ載ってクリップが効いていない'
+
+
+def test_chestnut_model_catalog_url_survives():
+  """chestnut のモデルカタログは **v25** 以上であること (09-06 に GS 側で先行 → 09-07 の追従で上流に吸収)。
+
+  ⚠⚠ v24 は 09-05 に「Update after recompiling model」→ Revert を 5 回繰り返した末に放棄され、
+  上流は v25 を作って master #1993 でそちらへ移した。**追従で v23/v24 に戻ると
+  Cinque Terre Model がカタログから消える**。カタログに無い bundle を選ぶと選択が error になり、
+  **chestnut スロットが空のまま残って stock supercombo まで落ちる**
+  (`get_active_bundle()` に cross-slot fallback が無い。09-06 に実車で踏んだ)。
+  ⚠ 上流が v26 以降を出したら**上げる**のは歓迎。**下げてはいけない**。
+  """
+  assert 'driving_models_chestnut_v25.json' in _read(FETCHER_PY), \
+    'chestnut のカタログが v25 でない = 追従で古い catalog に戻った疑い (CTM が選べなくなる)'
 
 
 def test_scc_map_gating_survives():
@@ -768,7 +783,12 @@ def test_modeld_keeps_raise_and_restart_instead_of_small_fallback():
   assert re.search(r'raise RuntimeError\(f"eGPU model load failed', src), \
     'ロード失敗で raise していない = 上流の small 降格に戻っている (黙って small で走る)'
   assert 'fall back to small' not in src, '上流の「走行中に small へ降格」が残っている'
-  assert 'ChestnutModelError' not in src, '上流 (master 09-01) の降格経路が入っている = 路線が変わった。user 判断が要る'
+  assert 'falling back to small' not in src, '走行中の small 降格 (上流の cloudlog) が戻っている'
+  assert 'small_model' not in src, '降格先の small_model が復活している = 路線が戻った'
+  # ⚠ 09-07 追従: 上流 (#1993) は ChestnutModelError を降格経路から切り離し、
+  # 「big のロードに失敗した」フラグとして put/remove するようになった (stock modeld.py も同型)。
+  # GS も raise する前に立てるので路線とは矛盾しない ⇒ param 名を見張りに使うのはやめ、
+  # 降格の実体 (small_model / falling back) で判定する。
   for name in ('reset_chestnut', 'save_dmesg_snapshot', 'capture_stdio', 'save_stdio_snapshot'):
     assert re.search(rf'\b{name}\(', src), f'modeld.py が {name}() を呼んでいない (診断/復帰の経路が落ちた)'
   assert re.search(r'def _load_with_retry\(', src) and re.search(r'_load_with_retry\(make_big\)', src), \
