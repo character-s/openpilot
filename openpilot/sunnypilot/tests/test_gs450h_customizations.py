@@ -182,7 +182,7 @@ def _c_struct_fields(rel: str, struct_name: str) -> dict[str, int]:
 GS_F_STEER_LIMITS = {
   'STEER_MAX': 1500,                    # EPS の hard limit。これ以上は EPS が受け付けない
   'STEER_ERROR_MAX': 900,               # Stage 4 (07-16): 750 -> 900
-  'STEER_DELTA_UP': 20,                 # Stage 9 (08-15): 15 -> 20。低速急カーブの立ち上がり短縮
+  'STEER_DELTA_UP': 17,                 # 09-08: 20 -> 17。CTM のモデル特性による低速振動を抑えるため (Stage 9 の 20 から)
   'STEER_DELTA_DOWN': 45,               # Stage 8 (08-03): 高トルク帯は fault 実績のある 45 に戻す
   'STEER_DELTA_DOWN_FAST': 50,          # 低トルク帯だけ 50
   'STEER_DELTA_DOWN_FAST_BELOW': 500,   # fault 最小事例 741 の下に余裕を取った閾値

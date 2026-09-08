@@ -56,7 +56,9 @@ class CarControllerParams:
       # Stage 9: 15->20 = 低速急カーブの立ち上がり短縮 (0->1500 が 1.00s -> 0.75s)。以前 15 へ落とした理由の
       # 振動は friction 0.11 が主因と確定済みで DELTA_UP は無関係 (再び下げる根拠にしないこと)。
       # panda 側は max_rate_up=25 なので mirror 不要。実測の根拠 = archive/probes/_steer_rate_hit.py
-      self.STEER_DELTA_UP = 20
+      # 09-08: 20 -> 17 (0->1500 が 0.75s -> 0.88s)。CTM (Cinque Terre) のモデル特性による低速の左右往復 (振動) を
+      # 立ち上がりを鈍らせて抑える試み。しばらく使って判定する。panda 側 25 以下なので mirror 不要。
+      self.STEER_DELTA_UP = 17
       # Stage 8: 戻しの上限は delta 値でなく EPS の追従能力。fault は全て |torque|>=741 の高トルク帯で乖離が
       # STEER_ERROR_MAX に達した瞬間、clip の 9 割は |torque|<500 → トルク帯で分け、高側は実証済みの 45。
       self.STEER_DELTA_DOWN = 45
