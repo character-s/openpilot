@@ -360,17 +360,36 @@ def test_scc_vision_curve_tuning_survives():
   """SCC-V (PLN-1 / PLN-6): カーブ手前の減速。実走 rlog の replay で決めたテーブル。
 
   ⚠⚠ **進入減速のテーブルは PLN-6 (09-06) で stock に戻した**。PLN-1_1 の形直しは撤回し、
-  GS の挙動は **`_ENTERING_DECEL_FLOOR` = -0.5 のクリップ 1 つ**に集約してある。
+  GS の挙動は **ENTERING 出力へのクリップ 1 つ**に集約してある。
   ⇒ **テーブルが stock 値でなくなったら、それは上流のリチューンなので歓迎 (この assert は残す)。
     落ちてはいけないのはクリップの方**。曲率テーブル (`_A_LAT_REG_MAX`) は PLN-1_1 のまま。
-  根拠 = archive/probes/_scc_replay.py --scan / _acc_brake_threshold.py / _decel_source_mix.py
+  ★ **PLN-6b (09-13) でクリップを速度依存にした** — 一律 -0.5 は交差点速度の曲がり角まで削っていた
+  (17 route / 10,139 ENTERING frame を `archive/probes/_scc_floor_scan.py` で測ると 40km/h 未満で
+  25-29% の frame をクリップ)。**低速端は stock テーブルの最深値以下 = 低速では噛まない**のが設計意図
+  なので、その関係そのものを下で assert する (数字を動かしても意図が壊れたら落ちる)。
+  根拠 = archive/probes/_scc_floor_scan.py / _scc_replay.py --scan / _acc_brake_threshold.py
   """
   assert _literal(SCC_VISION_PY, '_A_LAT_REG_MAX_BP') == [1.8, 2.4, 3.2]
   assert _literal(SCC_VISION_PY, '_A_LAT_REG_MAX_V') == [3.2, 3.2, 2.6]
-  assert _literal(SCC_VISION_PY, '_ENTERING_SMOOTH_DECEL_V') == [-0.2, -1.0]
+  stock_v = _literal(SCC_VISION_PY, '_ENTERING_SMOOTH_DECEL_V')
+  assert stock_v == [-0.2, -1.0]
   assert _literal(SCC_VISION_PY, '_ENTERING_SMOOTH_DECEL_BP') == [1.3, 3.0]
-  assert _literal(SCC_VISION_PY, '_ENTERING_DECEL_FLOOR') == -0.5
-  assert re.search(r'max\(float\(a_target\),\s*_ENTERING_DECEL_FLOOR\)', _read(SCC_VISION_PY)), \
+
+  floor_bp = _literal(SCC_VISION_PY, '_ENTERING_DECEL_FLOOR_BP')
+  floor_v = _literal(SCC_VISION_PY, '_ENTERING_DECEL_FLOOR_V')
+  assert floor_bp == [11.11, 13.89], 'floor の速度 BP (40/50 km/h) が変わっている'
+  assert floor_v == [-1.0, -0.5], 'floor の値が変わっている (高速端 -0.5 = 回生帯)'
+  assert floor_bp == sorted(floor_bp), 'np.interp は BP が昇順でないと黙って誤った値を返す'
+  # 設計意図 1: 低速端は stock テーブルが届かない深さ = 低速ではクリップが噛まない
+  assert floor_v[0] <= min(stock_v), \
+    '低速端の floor が stock テーブルより浅い = 低速でもクリップが噛む (PLN-6b の意図が壊れている)'
+  # 設計意図 2: ENTERING の runaway 域に入らない (v_target が負に走り TURNING に遷移しなくなる)
+  assert min(floor_v) >= -1.4, 'floor が -1.4 より深い = ENTERING runaway 域'
+
+  assert re.search(r'np\.interp\(\s*self\.v_ego,\s*_ENTERING_DECEL_FLOOR_BP,\s*_ENTERING_DECEL_FLOOR_V\s*\)',
+                   _read(SCC_VISION_PY)), \
+    'floor が速度で引かれていない = 定数だけ載って interp が効いていない'
+  assert re.search(r'max\(float\(a_target\),\s*float\(decel_floor\)\)', _read(SCC_VISION_PY)), \
     'ENTERING の減速に floor を当てる行が無い = 定数だけ載ってクリップが効いていない'
 
 
