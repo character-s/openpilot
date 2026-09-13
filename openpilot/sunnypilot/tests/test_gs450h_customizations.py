@@ -771,6 +771,38 @@ def test_selfdrived_big_model_warmup_gate_survives():
     'upstream の「ロード完了と同時に Ready」が残っている'
 
 
+def test_selfdrived_localization_debounce_survives():
+  """PLN-7 (09-14): localization 系の一過性 NG で警告音を鳴らさないためのデバウンス。
+
+  ⚠ modeld が 1 フレーム落とすと cameraOdometry が valid=0 で publish され、locationd の
+  `sm.all_valid()` が 1 メッセージだけ落ちて `inputsOK=0` になる。upstream はこれを即
+  `ET.SOFT_DISABLE` で拾うので **softDisabling に入り warningSoft が鳴る**が、次のメッセージで
+  復帰するため実際の解除には至らない = 音と表示だけの偽アラート (実測 7h で 6 件)。
+  ⇒ GS は **窓を超えて続いたときだけ**イベントを上げる。本物 (起動直後の 0.5s 以上) は素通しする。
+  根拠と実測 = archive/probes/_alert_sound_trace.py / _locationd_invalid_window.py
+  """
+  src = _read(SELFDRIVED_PY)
+  # ⚠ 定義が `int(0.6 / DT_CTRL)` = 式なので `_literal` は使えない (ast.literal_eval が落ちる)。式の形で見る。
+  assert re.search(r'LOCALIZATION_DEBOUNCE_FRAMES\s*=\s*int\(0\.6 / DT_CTRL\)', src), \
+    'デバウンス窓が 0.6 秒でなくなっている (実測の最長 0.47s = extrinsicsCalibration 巻き込み分を割れなくなる)'
+
+  for name, ev in (('posenet_invalid_frames', 'posenetInvalid'),
+                   ('locationd_invalid_frames', 'locationdTemporaryError'),
+                   ('paramsd_invalid_frames', 'paramsdTemporaryError')):
+    assert re.search(rf'if self\.{name} > LOCALIZATION_DEBOUNCE_FRAMES:\s*\n\s*self\.events\.add\(EventName\.{ev}\)', src), \
+      f'{ev} が窓を通さず即上がる形に戻っている (upstream の素の if に戻った疑い)'
+    assert re.search(rf'self\.{name} = 0\b', src), f'{name} のリセットが無い'
+
+  # ⚠ 設計意図: 免除 (big_model_settling) 中にカウンタを戻さないと、免除が明けた瞬間に
+  #   溜まったカウンタで即発火して意味が無くなる。else 節でのリセットが要る。
+  reset_block = (r'else:\s*\n(?:\s*#.*\n)*' +
+                 r'\s*self\.posenet_invalid_frames = 0\s*\n' +
+                 r'\s*self\.locationd_invalid_frames = 0\s*\n' +
+                 r'\s*self\.paramsd_invalid_frames = 0')
+  assert re.search(reset_block, src), \
+    '免除中のカウンタリセットが無い = 免除が明けた瞬間に溜まった分で即発火する'
+
+
 def test_modeld_restart_on_crash_survives():
   """08-29/08-30: chestnut の GPU ハングで modeld が落ちたら manager が再起動する (big のまま復帰)。
 
