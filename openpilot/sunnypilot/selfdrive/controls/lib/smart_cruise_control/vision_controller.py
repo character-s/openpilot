@@ -51,7 +51,7 @@ _NO_OVERSHOOT_TIME_HORIZON = 4.  # s. Time to use for velocity desired based on 
 # negative, the car keeps slowing, current lat acc never reaches _TURNING_LAT_ACC_TH and ENTERING
 # latches into a runaway (replayed with archive/probes/_scc_replay.py).
 # GS450h PLN-6 (2026-09-06): PLN-1_1's reshaped table above is WITHDRAWN - the table is stock again and
-# the GS behaviour is now one clip, _ENTERING_DECEL_FLOOR, applied to its output. Replaying a whole
+# the GS behaviour is now one clip, _ENTERING_DECEL_FLOOR_BP/_V below, applied to its output. Replaying a whole
 # 115-segment route (archive/probes/_scc_replay.py --scan) found 31 interventions, and only the 7
 # predicting >= 2.5 m/s2 ever constrained anything: each asked for 6 to 22 km/h below the speed the
 # driver had just carried through that same corner (worst: 70.3 -> 46.8 km/h, where the driver
@@ -70,8 +70,19 @@ _ENTERING_SMOOTH_DECEL_BP = [1.3, 3.0]  # absolute value of lat acc ahead (stock
 # 1.000 for every band deeper than -0.5, 0.03 shallower than -0.3), and UN R13-H forbids the brake
 # lamps below 0.7 m/s2, so this keeps curve entry inside the regenerative band where nothing lights up.
 # Same number as A_CRUISE_MIN / PLN-5 in longitudinal_planner.py, on purpose.
-# NOTE: not yet confirmed by eye on the road - if the lamps do come on, drop this to -0.3.
-_ENTERING_DECEL_FLOOR = -0.5
+# NOTE: not yet confirmed by eye on the road - if the lamps do come on, drop the fast end to -0.3.
+#
+# GS450h PLN-6b: the floor is speed-dependent. A flat -0.5 clipped junction-speed corners too, where
+# the stock depth is the behaviour the driver actually wants; the phantom braking this clip exists for
+# only happens on fast bends (the ones that made the driver cancel were taken at 58 / 68 / 70 km/h).
+# Measured over 17 routes / 10,139 ENTERING frames with archive/probes/_scc_floor_scan.py: the clip
+# bit on 25-29% of the frames below 40 km/h, while the fast bends it is there for sit at 50-60 km/h
+# (18.2% of frames, and 0.15 m/s2 off the median clipped one - the deepest bite of any band).
+# The slow end is -1.0, i.e. the deepest value the stock table above can produce, so below 40 km/h the
+# clip can never bite and the stock table passes through untouched.
+# Do NOT deepen the slow end past ~-1.4 - see the ENTERING runaway note on the table above.
+_ENTERING_DECEL_FLOOR_BP = [11.11, 13.89]  # m/s (40, 50 km/h)
+_ENTERING_DECEL_FLOOR_V = [-1.0, -0.5]  # slow: stock passes through / fast: regenerative band
 
 # Lookup table for the acceleration for the TURNING state
 # depending on the current lateral acceleration of the vehicle.
@@ -208,8 +219,10 @@ class SmartCruiseControlVision:
     elif self.state == VisionState.entering:
       # when not overshooting, target a smooth deceleration in preparation for a sharp turn to come.
       a_target = np.interp(self.max_pred_lat_acc, _ENTERING_SMOOTH_DECEL_BP, _ENTERING_SMOOTH_DECEL_V)
-      # GS450h PLN-6: never brake into a corner harder than the regenerative band (see the floor above).
-      a_target = max(float(a_target), _ENTERING_DECEL_FLOOR)
+      # GS450h PLN-6: never brake into a fast corner harder than the regenerative band. Below the slow
+      # breakpoint the floor is deeper than this table can reach, so stock passes through (see above).
+      decel_floor = np.interp(self.v_ego, _ENTERING_DECEL_FLOOR_BP, _ENTERING_DECEL_FLOOR_V)
+      a_target = max(float(a_target), float(decel_floor))
     # TURNING
     elif self.state == VisionState.turning:
       # When turning, we provide a target acceleration that is comfortable for the lateral acceleration felt.
