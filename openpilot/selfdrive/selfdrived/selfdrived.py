@@ -57,6 +57,22 @@ IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 # この窓の間は NO_ENTRY も出し続けないと「チェックは死んでいるのに engage は通る」穴になる。
 BIG_MODEL_WARMUP = 5.
 
+# GS450h PLN-7: localization 系の**一過性**の NG ではアラートを出さないためのデバウンス窓。
+# 機序 (09-13 に rlog で確定) = modeld が 1 フレーム落とすと、その瞬間の cameraOdometry が
+# valid=0 で publish され、locationd の `inputs_valid = sm.all_valid() and ...` が 1 メッセージ
+# だけ False になって deviceMotion.inputsOK=0 が出る。selfdrived はこれを ET.SOFT_DISABLE で
+# 拾うので **state が softDisabling に入り warningSoft (「TAKE CONTROL IMMEDIATELY」) が鳴る**。
+# ところが inputsOK は次のメッセージで戻るため実際の解除には至らず、音と表示だけが残る。
+# ⚠ softDisabling は ACTIVE_STATES なので `active` は 1 のまま = active の遷移では見えない。
+#
+# 実測 (route 062/063/064 = 計 7h、archive/probes/_alert_sound_trace.py で音まで確認):
+#   鳴った 6 件のうち 5 件は deviceMotion 1 メッセージ (40-60ms)。最長は 064 seg227 の 0.47 秒で、
+#   これは cameraOdometry に加えて extrinsicsCalibration まで巻き込まれた分だけ復帰が遅れたもの
+#   (引き金は同じ 1 フレーム欠落)。⇒ 0.6 秒あれば実測の偽アラートは全部落ちる。
+# 一方 **本物の「入力が無い」状態は起動直後に 0.5 秒以上続く**ので、この窓で分離できる。
+# ⚠ soft disable 自体が 3 秒のカウントダウンを持つため、0.6 秒の遅延は安全側を実質損なわない。
+LOCALIZATION_DEBOUNCE_FRAMES = int(0.6 / DT_CTRL)
+
 
 class SelfdriveD(CruiseHelper):
   def __init__(self, CP=None, CP_SP=None):
@@ -144,6 +160,10 @@ class SelfdriveD(CruiseHelper):
     self.last_functional_fan_frame = 0
     self.events_prev = []
     self.logged_comm_issue = None
+    # GS450h PLN-7: localization 系の一過性 NG を数える (詳細は _LOC_DEBOUNCE_FRAMES の定義)
+    self.posenet_invalid_frames = 0
+    self.locationd_invalid_frames = 0
+    self.paramsd_invalid_frames = 0
     self.not_running_prev = None
     self.experimental_mode = False
     self.personality = get_sanitize_int_param(
@@ -467,13 +487,25 @@ class SelfdriveD(CruiseHelper):
       self.logged_comm_issue = None
 
     if not self.CP.notCar and not big_model_settling:  # localization has nothing to work with during the load
-      if not self.sm['deviceMotion'].posenetOK:
+      # GS450h PLN-7: 一過性の NG は数えるだけで上げない (窓の根拠 = LOCALIZATION_DEBOUNCE_FRAMES)
+      device_motion = self.sm['deviceMotion']
+      paramsd_invalid = (not self.sm['vehicleParameters'].valid and cal_status == log.ExtrinsicsCalibration.Status.calibrated and
+                         not TESTING_CLOSET and (not SIMULATION or REPLAY))
+      self.posenet_invalid_frames = 0 if device_motion.posenetOK else self.posenet_invalid_frames + 1
+      self.locationd_invalid_frames = 0 if device_motion.inputsOK else self.locationd_invalid_frames + 1
+      self.paramsd_invalid_frames = self.paramsd_invalid_frames + 1 if paramsd_invalid else 0
+
+      if self.posenet_invalid_frames > LOCALIZATION_DEBOUNCE_FRAMES:
         self.events.add(EventName.posenetInvalid)
-      if not self.sm['deviceMotion'].inputsOK:
+      if self.locationd_invalid_frames > LOCALIZATION_DEBOUNCE_FRAMES:
         self.events.add(EventName.locationdTemporaryError)
-      if (not self.sm['vehicleParameters'].valid and cal_status == log.ExtrinsicsCalibration.Status.calibrated and
-          not TESTING_CLOSET and (not SIMULATION or REPLAY)):
+      if self.paramsd_invalid_frames > LOCALIZATION_DEBOUNCE_FRAMES:
         self.events.add(EventName.paramsdTemporaryError)
+    else:
+      # ⚠ 免除中にリセットしないと、免除が明けた瞬間に溜まったカウンタで即発火する
+      self.posenet_invalid_frames = 0
+      self.locationd_invalid_frames = 0
+      self.paramsd_invalid_frames = 0
 
     # conservative HW alert. if the data or frequency are off, locationd will throw an error
     if any((self.sm.frame - self.sm.recv_frame[s])*DT_CTRL > 10. for s in self.sensor_packets):
