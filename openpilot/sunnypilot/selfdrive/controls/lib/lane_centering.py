@@ -9,7 +9,7 @@ P だけで足りる理由: lookahead L=v 先の横誤差 e(L) ≈ e(0) + ψ·L 
 速度不変で big の復元勾配と同オーダーになる (旧 e_y の P はその 1/3 で、それが I を必要とした)。
 
 制御則での StarPilot 原版との差 = 幅急変ガード (_WIDTH_JUMP_LIMIT、原版に無し) と低速スケジュール
-(_MIN_V_EGO / _LOWSPEED_*) の 2 つ。ほかに GS 側の追加 = enabled OFF 時の平滑 (_DISABLE_RELEASE_TAU、UI トグルで
+(_MIN_V_EGO / _LOWSPEED_*)、高速スケジュール (_HIGHSPEED_*、既定 x2.0) の 3 つ。ほかに GS 側の追加 = enabled OFF 時の平滑 (_DISABLE_RELEASE_TAU、UI トグルで
 走行中に切れるため) と params_fork 経由の設定読み (lane_centering_params.py)。
 一度変えた 3 定数 (authority / 幅門 / break_in 帯) は全部原版へ戻した。
 定数の採否根拠 = tests/test_lane_centering.py の各 docstring、実測の出所 = archive/probes/_lane_analysis.py。
@@ -45,8 +45,32 @@ _LOWSPEED_GAIN = 1.0
 _LOWSPEED_DEADBAND = 0.04    # [m] (高速側 0.08)
 _LOWSPEED_LOOKAHEAD_MIN = 6.0  # [m] (高速側 8.0)
 
-def _gain_for(v_ego: float) -> float:
-  return float(np.interp(v_ego, _LOWSPEED_V, (_LOWSPEED_GAIN, _MAX_GAIN)))
+# ★ GS 追加 (09-16): 高速スケジュール。**既定は x2.0 = lcp.DEFAULTS (user 09-16 決定)**。
+#   設定で standard (_MAX_GAIN) を選べば 1 bit も変わらない状態へ戻せる = 退避先。
+#   09-16 実測: >61km/h の直進は車線中心 +0.005m = 誤差が不感帯 0.08 の内側で LC は何もしていない。
+#   ずれているのはカーブで、中心より 0.17-0.26m イン側・エッジ触 3.9-6.9% ⇒ 高速で効かせる先はカーブだけ。
+#   ⚠ authority (大きくずれたら譲る) を同じ区間で外すのは、**高速では駐車車両の回避のような
+#   「モデルの意思」がほとんど無い**ため (user 09-16)。低速では回避が本物なので触らない。
+_HIGHSPEED_V = (17.0, 22.0)        # [m/s] 61〜79km/h で切り替え
+_MAX_HIGHSPEED_GAIN = 0.80         # 設定の上限 (lcp.HIGHSPEED_GAIN_CHOICES の最大と一致させる)
+_HIGHSPEED_AUTHORITY_SCALE = 0.0   # 79km/h 以上では authority を 0 = 引っ込めない
+
+
+def _gain_for(v_ego: float, highspeed_gain: float = _MAX_GAIN) -> float:
+  """低速 (29-45km/h) と高速 (61-79km/h) の 2 段スケジュールを 1 本の interp で引く。
+
+  ⚠ np.interp は x が昇順でないと黙って誤った値を返す ⇒ 4 点の並びを崩さないこと。
+  """
+  return float(np.interp(v_ego,
+                         (_LOWSPEED_V[0], _LOWSPEED_V[1], _HIGHSPEED_V[0], _HIGHSPEED_V[1]),
+                         (_LOWSPEED_GAIN, _MAX_GAIN, _MAX_GAIN, max(float(highspeed_gain), _MAX_GAIN))))
+
+
+def _authority_scale_for(v_ego: float, highspeed_gain: float = _MAX_GAIN) -> float:
+  """authority を高速で外す割合。⚠ 「強くする」を選んでいないときは 1.0 = 何もしない。"""
+  if highspeed_gain <= _MAX_GAIN:
+    return 1.0
+  return float(np.interp(v_ego, _HIGHSPEED_V, (1.0, _HIGHSPEED_AUTHORITY_SCALE)))
 
 def _deadband_for(v_ego: float) -> float:
   return float(np.interp(v_ego, _LOWSPEED_V, (_LOWSPEED_DEADBAND, _CENTER_ERROR_DEADBAND)))
@@ -101,6 +125,7 @@ class LaneCenteringController:
     self.offset = lcp.DEFAULTS[lcp.KEY_OFFSET]
     self.e2e_authority = lcp.DEFAULTS[lcp.KEY_AUTHORITY]
     self.pause_on_signal = lcp.DEFAULTS[lcp.KEY_PAUSE_ON_SIGNAL]
+    self.highspeed_gain = lcp.DEFAULTS[lcp.KEY_HIGHSPEED_GAIN]
     self.update_params()
 
   def update_params(self) -> None:
@@ -114,9 +139,10 @@ class LaneCenteringController:
       offset = lcp.read_float(lcp.KEY_OFFSET)
       authority = lcp.read_float(lcp.KEY_AUTHORITY)
       pause_on_signal = lcp.read_bool(lcp.KEY_PAUSE_ON_SIGNAL)
+      highspeed_gain = lcp.read_float(lcp.KEY_HIGHSPEED_GAIN)
     except Exception:
       return
-    if not np.isfinite([offset, authority]).all():
+    if not np.isfinite([offset, authority, highspeed_gain]).all():
       return
     if enabled and not self.enabled:
       # ⚠ OFF→ON: OFF の間は _raw_correction を通らないので _width_ref が更新されず、
@@ -128,6 +154,8 @@ class LaneCenteringController:
     self.offset = float(np.clip(offset, -_MAX_OFFSET, _MAX_OFFSET))
     self.e2e_authority = float(np.clip(authority, 0.0, 1.0))
     self.pause_on_signal = pause_on_signal
+    # ⚠ 下限は _MAX_GAIN = 「標準より弱くはしない」(弱める側は低速スケジュールと衝突するため)
+    self.highspeed_gain = float(np.clip(highspeed_gain, _MAX_GAIN, _MAX_HIGHSPEED_GAIN))
 
   def apply(self, desired_curvature, sm, CS, CC, maneuver_active: bool, lane_change_active: bool):
     """controlsd から 1 行で呼ぶための入口。
@@ -191,11 +219,12 @@ class LaneCenteringController:
       v_ego = float(v_ego)
       offset = float(self.offset)
       e2e_authority = float(self.e2e_authority)
+      highspeed_gain = float(self.highspeed_gain)
     except (TypeError, ValueError):
       self.reset()
       return model_curvature
 
-    if not np.isfinite([v_ego, offset, e2e_authority]).all():
+    if not np.isfinite([v_ego, offset, e2e_authority, highspeed_gain]).all():
       self.reset()
       return model_curvature
 
@@ -221,13 +250,13 @@ class LaneCenteringController:
       model_v2,
       v_ego,
       float(np.clip(offset, -_MAX_OFFSET, _MAX_OFFSET)),
-      float(np.clip(e2e_authority, 0.0, 1.0)),
+      float(np.clip(e2e_authority, 0.0, 1.0)) * _authority_scale_for(v_ego, highspeed_gain),
     )
     if not valid:
       # 白線を見失った瞬間に補正を切ると段差になるので、0.2s で抜く
       return model_curvature + self._release(_CONFIDENCE_RELEASE_TAU)
 
-    target = float(np.clip(raw_correction, -_MAX_RAW_CORRECTION, _MAX_RAW_CORRECTION)) * _gain_for(v_ego)
+    target = float(np.clip(raw_correction, -_MAX_RAW_CORRECTION, _MAX_RAW_CORRECTION)) * _gain_for(v_ego, highspeed_gain)
     self._correction = float(_smooth(target, self._correction, _SMOOTH_TAU, self.dt))
     return model_curvature + self._correction
 

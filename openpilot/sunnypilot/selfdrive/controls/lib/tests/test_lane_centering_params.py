@@ -63,18 +63,20 @@ def test_params_keys_h_no_longer_declares_the_keys():
 # ── 定義の整合 (ここがずれると画面と制御が別の値を指す) ──
 
 def test_defaults_cover_every_key_with_the_right_type():
-  """DEFAULTS が 4 つとも埋まっていて、型が bool / float で揃っていること。
+  """DEFAULTS が 5 つとも埋まっていて、型が bool / float で揃っていること。
 
   ⚠ 欠けると `read_bool` / `read_float` が KeyError で落ちる (= controlsd の 1Hz ループが
   例外を握って前回値のまま走り続ける = 設定が効かない理由が見えなくなる)。
   ⚠ 型がずれると `write()` の書式判定 (キーの型で bool / float を決める) が狂う。
+  ⚠ 列挙で書いてあるのは意図的 — キーを足したらここも通らないので、UI と制御の両方を直し忘れない。
   """
-  assert set(lcp.DEFAULTS) == {lcp.KEY_ENABLED, lcp.KEY_OFFSET,
-                               lcp.KEY_AUTHORITY, lcp.KEY_PAUSE_ON_SIGNAL}
+  assert set(lcp.DEFAULTS) == {lcp.KEY_ENABLED, lcp.KEY_OFFSET, lcp.KEY_AUTHORITY,
+                               lcp.KEY_PAUSE_ON_SIGNAL, lcp.KEY_HIGHSPEED_GAIN}
   assert isinstance(lcp.DEFAULTS[lcp.KEY_ENABLED], bool)
   assert isinstance(lcp.DEFAULTS[lcp.KEY_PAUSE_ON_SIGNAL], bool)
   assert isinstance(lcp.DEFAULTS[lcp.KEY_OFFSET], float)
   assert isinstance(lcp.DEFAULTS[lcp.KEY_AUTHORITY], float)
+  assert isinstance(lcp.DEFAULTS[lcp.KEY_HIGHSPEED_GAIN], float)
 
 
 def test_offset_choices_stay_inside_the_controller_clip():

@@ -54,6 +54,7 @@ KEY_ENABLED = "LaneCentering"
 KEY_OFFSET = "LaneCenterOffset"
 KEY_AUTHORITY = "LaneCenteringE2EAuthority"
 KEY_PAUSE_ON_SIGNAL = "LaneCenteringPauseOnSignal"
+KEY_HIGHSPEED_GAIN = "LaneCenteringHighSpeedGain"
 
 # ⚠ 「値が読めない」= 既定値であって「前回値を維持」ではない — 前回値だと「LaneCentering だけ
 # ファイルを置いた」ときに他の 3 つが更新されず、項目ごとに世代の違う値が混ざる。
@@ -62,6 +63,7 @@ DEFAULTS = {
   KEY_OFFSET: 0.0,
   KEY_AUTHORITY: 1.0,
   KEY_PAUSE_ON_SIGNAL: True,
+  KEY_HIGHSPEED_GAIN: 0.60,   # x2.0 (user 09-16 決定)。0.30 を選べば制御側 _MAX_GAIN = 従来と同一
 }
 
 # UI が回す選択肢。⚠ offset の符号はデバイス座標 (y は左が正) に従い **+ が左寄せ**。
@@ -73,6 +75,15 @@ OFFSET_CHOICES = (-0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3)
 # 0.25 刻み。⚠ 0 にすると構造変化の保護が消える (08-26 実測: 幅 3.0→4.0m で la +0.234 m/s²) ので、
 # 0 を選べること自体は残しつつ既定は 1.0 のまま。
 AUTHORITY_CHOICES = (0.0, 0.25, 0.5, 0.75, 1.0)
+
+# 高速 (61km/h 以上) でのゲイン。**既定 = 0.60 (x2.0、user 09-16 決定)**。0.30 = standard を選ぶと
+# **高速スケジュールごと無効** (従来と 1 bit も同じ) = 退避先。
+# 上げると 61→79km/h で線形に強くなり、同じ区間で authority の引っ込めも外れる。
+# ⚠ 根拠 (09-16 実測): >61km/h の**直進**は車線中心 +0.005m で既に完璧 = 誤差が不感帯 0.08 の内側にあり
+# LC は何もしていない。ずれているのは**カーブ**で、車線中心より 0.17-0.26m イン側・エッジ触 3.9-6.9%。
+# ⇒ 高速で強くして効く先はカーブだけ。authority を外してよいのは、**高速では駐車車両の回避のような
+# 「モデルの意思」がほとんど無い**ため (user 09-16)。
+HIGHSPEED_GAIN_CHOICES = (0.30, 0.45, 0.60, 0.80)
 
 
 def offset_label(v: float) -> str:
@@ -88,6 +99,11 @@ def offset_label(v: float) -> str:
 
 def authority_label(v: float) -> str:
   return f"{int(round(v * 100))}%"
+
+
+def highspeed_gain_label(v: float) -> str:
+  """⚠ UI は表示ラベルを index() で引くので、選択肢の中で**重複してはいけない**。"""
+  return "standard" if v <= 0.3005 else f"x{v / 0.30:.1f}"
 
 
 def read(key):

@@ -11,7 +11,8 @@ import pytest
 
 from openpilot.sunnypilot.selfdrive.controls.lib import lane_centering_params as lcp
 from openpilot.sunnypilot.selfdrive.controls.lib.lane_centering import (
-  LaneCenteringController, _deadband_for, _gain_for, _lookahead_min_for,
+  LaneCenteringController, _authority_scale_for, _deadband_for, _gain_for, _lookahead_min_for,
+  _MAX_GAIN, _MAX_HIGHSPEED_GAIN,
 )
 
 
@@ -38,11 +39,15 @@ def _model(left=-1.8, right=1.8, model_y=0.0, lane_prob=0.9, lane_std=0.1, path_
 
 
 def _update(controller, model, *, offset=0.0, authority=0.0, enabled=True, active=True, valid=True, speed=_V_EGO,
-            pause_on_signal=False, turn_signal_active=False):
+            pause_on_signal=False, turn_signal_active=False, highspeed_gain=_MAX_GAIN):
+  # ⚠ highspeed_gain の既定をここで **standard (_MAX_GAIN)** に固定しているのは意図的。
+  #   出荷時の既定は x2.0 (user 09-16) だが、**上流 (StarPilot) の挙動を固定しているテストは
+  #   高速スケジュールの影響を受けてはいけない**。強くした側を見たいテストだけ値を渡す。
   controller.enabled = enabled
   controller.offset = offset
   controller.e2e_authority = authority
   controller.pause_on_signal = pause_on_signal
+  controller.highspeed_gain = highspeed_gain
   lane_change = model.meta.laneChangeState != 0
   return controller.update(0.0, model, speed, active, valid, lane_change, turn_signal_active)
 
@@ -530,3 +535,89 @@ def test_apply_passes_through_gates():
   cs2 = SimpleNamespace(vEgo=_V_EGO, leftBlinker=False, rightBlinker=False)
   assert c.apply(0.0, _SM(model, frame=1, checks=False), cs2, cc, False, False) == 0.0
   assert c.apply(0.0, _SM(model, frame=1), cs2, cc, False, True) == 0.0
+
+
+# ── 高速スケジュール (09-16 追加) ─────────────────────────────────────────
+
+def test_highspeed_standard_is_a_noop():
+  """standard (0.30) を選べば高速スケジュールは 1 bit も効かないこと = 従来の挙動へ戻せる退避先。
+
+  ⚠ 既定は x2.0 (user 09-16 決定) だが、**実走で悪ければ UI で standard に戻せる**ことが要。
+  LC は 08-26 に 3 定数を変えて実測で全部戻した経緯があるので、戻し先を必ず残す。
+  """
+  for v in (12.5, 17.0, 20.0, 25.0, 35.0):
+    assert _gain_for(v) == pytest.approx(_MAX_GAIN)
+    assert _gain_for(v, _MAX_GAIN) == pytest.approx(_MAX_GAIN)
+    assert _authority_scale_for(v, _MAX_GAIN) == pytest.approx(1.0)
+
+
+def test_highspeed_gain_ramps_only_between_61_and_79kmh():
+  """立ち上がりは 61km/h から。45-61km/h の帯 (今まで良好だった帯) は変えない。"""
+  assert _gain_for(12.5, 0.60) == pytest.approx(0.30)   # 45km/h
+  assert _gain_for(17.0, 0.60) == pytest.approx(0.30)   # 61km/h = 立ち上がり点
+  assert _gain_for(19.5, 0.60) == pytest.approx(0.45)   # 中点
+  assert _gain_for(22.0, 0.60) == pytest.approx(0.60)   # 79km/h で満額
+  assert _gain_for(35.0, 0.60) == pytest.approx(0.60)   # それ以上は頭打ち
+
+
+def test_highspeed_never_touches_the_low_end():
+  """低速スケジュール (29-45km/h) は高速設定を上げても不変であること。"""
+  for v in (2.5, 5.0, 8.0, 10.0, 12.5):
+    assert _gain_for(v, _MAX_HIGHSPEED_GAIN) == pytest.approx(_gain_for(v))
+    assert _authority_scale_for(v, _MAX_HIGHSPEED_GAIN) == pytest.approx(1.0)
+
+
+def test_highspeed_releases_authority_only_when_strengthened():
+  """authority (大きくずれたら譲る) を外すのは「強くする」を選んだときだけ、かつ高速だけ。
+
+  高速では駐車車両の回避のような「モデルの意思」がほとんど無い (user 09-16) ので譲る理由が薄い。
+  低速は回避が本物なので 1.0 のまま。
+  """
+  assert _authority_scale_for(22.0, _MAX_GAIN) == pytest.approx(1.0)   # 標準なら外さない
+  assert _authority_scale_for(17.0, 0.60) == pytest.approx(1.0)        # 61km/h = まだ外さない
+  assert _authority_scale_for(19.5, 0.60) == pytest.approx(0.5)
+  assert _authority_scale_for(22.0, 0.60) == pytest.approx(0.0)        # 79km/h で完全に外れる
+
+
+@pytest.mark.parametrize("hs_gain,expect", [(0.30, 0.6), (0.45, 0.9), (0.60, 1.2), (0.80, 1.6)])
+def test_highspeed_scales_the_lat_accel_as_configured(hs_gain, expect):
+  """実効 la が設定どおり `expect × (|err| - deadband)` になること (標準 0.6 の何倍か)。"""
+  err, speed = 0.3, 25.0
+  controller = LaneCenteringController()
+  # ⚠ 既定 (x2.0) に依存せず、値ごとに固定して測る
+  steady = _feed(controller, _model(left=-1.5, right=2.1), 300, speed=speed, highspeed_gain=hs_gain)
+  assert np.isclose(steady * speed ** 2, expect * (err - 0.08), rtol=1e-3)
+
+
+def test_highspeed_gain_is_clipped_to_the_choice_range():
+  """設定値は [標準, 上限] に丸める。⚠ 標準より弱くはしない (弱める側は低速スケジュールと衝突する)。"""
+  controller = LaneCenteringController()
+  controller.highspeed_gain = 5.0
+  assert _gain_for(35.0, float(np.clip(controller.highspeed_gain, _MAX_GAIN, _MAX_HIGHSPEED_GAIN)))       == pytest.approx(_MAX_HIGHSPEED_GAIN)
+  assert _gain_for(35.0, 0.0) == pytest.approx(_MAX_GAIN)
+
+
+def test_highspeed_choices_are_consistent_with_the_controller():
+  """UI の選択肢と制御側の上限・既定がずれていないこと。ラベルは index() で引くので重複禁止。"""
+  assert lcp.DEFAULTS[lcp.KEY_HIGHSPEED_GAIN] == pytest.approx(0.60), '既定 = x2.0 (user 09-16 決定)'
+  assert lcp.DEFAULTS[lcp.KEY_HIGHSPEED_GAIN] in lcp.HIGHSPEED_GAIN_CHOICES
+  assert _MAX_GAIN in lcp.HIGHSPEED_GAIN_CHOICES, 'standard (従来と同一) へ戻す選択肢が消えている'
+  assert max(lcp.HIGHSPEED_GAIN_CHOICES) == pytest.approx(_MAX_HIGHSPEED_GAIN)
+  labels = [lcp.highspeed_gain_label(v) for v in lcp.HIGHSPEED_GAIN_CHOICES]
+  assert len(set(labels)) == len(labels)
+
+
+def test_shipped_default_strengthens_high_speed_only():
+  """出荷時の既定 (x2.0) が **controller まで届いている**こと = 配信しただけで高速カーブが強くなる。
+
+  ⚠ ここだけ `_update` のヘルパを通さない (ヘルパは standard 固定なので既定の経路を見られない)。
+  """
+  controller = LaneCenteringController()          # params ファイルが無ければ lcp.DEFAULTS が載る
+  assert controller.highspeed_gain == pytest.approx(0.60)
+  hs = controller.highspeed_gain
+  assert _gain_for(25.0, hs) == pytest.approx(0.60)    # 90km/h = x2.0
+  assert _gain_for(12.5, hs) == pytest.approx(_MAX_GAIN)  # 45km/h = 従来のまま
+  assert _gain_for(8.0, hs) == pytest.approx(1.0)      # 29km/h 以下 = 低速スケジュールのまま
+  assert _authority_scale_for(25.0, hs) == pytest.approx(0.0)   # 高速では譲らない
+  assert _authority_scale_for(12.5, hs) == pytest.approx(1.0)   # 45km/h では従来どおり譲る
+
