@@ -764,11 +764,20 @@ def test_selfdrived_big_model_warmup_gate_survives():
   assert re.search(r'warming_up\s*=\s*self\.big_model_loading\s+or\s+time\.monotonic\(\)\s*<\s*self\.big_model_ready_t\s*\+\s*BIG_MODEL_WARMUP', src), \
     'warmup 窓の NO_ENTRY (bigModelLoading の延長) が落ちている'
   # Ready 音: ロード完了の瞬間 (upstream) ではなく、announced フラグ付きの elif で鳴らす
-  ready_after_window = (r'elif self\.big_model_ready_t and not self\.big_model_announced:\s*\n' +
+  # ⚠ 条件は増えることがある (09-15 に modelV2 の alive を追加) ので、elif と announced フラグだけを見る
+  ready_after_window = (r'elif self\.big_model_ready_t and not self\.big_model_announced[^:\n]*:\s*\n' +
                         r'(?:\s*#.*\n)*\s*self\.events_sp\.add\(custom\.OnroadEventSP\.EventName\.bigModelReady\)')
   assert re.search(ready_after_window, src), 'Ready 音が warmup 窓の前に戻っている (「Ready と言われたのに準備中」が再発する)'
   assert not re.search(r'self\.big_model_ready_t = time\.monotonic\(\)\s*\n\s*self\.events_sp\.add\(.*bigModelReady', src), \
     'upstream の「ロード完了と同時に Ready」が残っている'
+  # 09-15: Ready と Big Model Failed が同じフレームで両方出るのを潰した分 (user が実機で訴え、
+  # onroadEvents の実測で bigModelFailed が毎フレーム出ているのを確認した)。
+  # ⚠ ChestnutActive=True を書いてから最初の modelV2 publish までは alive=False なので、
+  #   この 2 つが落ちると model_unavailable が真になり Ready と Failed が同じフレームで両方出る。
+  assert re.search(r'not self\.big_model_announced and self\.sm\.alive\[.modelV2.\]', src), \
+    'Ready 音が modelV2 の alive を待たなくなっている (Ready と Failed が同時に出る)'
+  assert re.search(r'not self\.sm\.alive\[.modelV2.\]\s*\n?\s*and not warming_up', src), \
+    'warmup 中の「まだ流れていないだけ」を Failed 扱いに戻している'
 
 
 def test_selfdrived_localization_debounce_survives():
