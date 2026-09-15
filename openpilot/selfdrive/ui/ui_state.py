@@ -230,11 +230,18 @@ class UIState(UIStateSP):
       self.chestnut_state = ChestnutState.DISCONNECTED
     elif not self.chestnut_compiled:
       self.chestnut_state = ChestnutState.UNCOMPILED
-    elif self.chestnut_state == ChestnutState.FAILED or not detected or (model_seen and (not self.sm.alive["modelV2"] or not self.sm["modelV2"].big)):
+    # GS450h: upstream は一度 FAILED になるとその ignition サイクル中ずっと FAILED のままだった
+    # (条件に `self.chestnut_state == ChestnutState.FAILED` が入っていた)。だが実際には manager が
+    # modeld を上げ直して big のまま復帰する (09-15 は 1 日で 10 回復帰した)。ラッチしたままだと
+    # big で走っている間ずっと警告アイコンが出たままになり、今どちらで走っているのか判らない。
+    # modelV2 が big で生きているかで確実に判定できるので、ラッチは外す。
+    elif not detected or (model_seen and (not self.sm.alive["modelV2"] or not self.sm["modelV2"].big)):
       self.chestnut_state = ChestnutState.FAILED
     elif self.chestnut_loading or not model_seen:
       self.chestnut_state = ChestnutState.LOADING
     elif self.chestnut_active is False:
+      # ⚠ ChestnutActive は modeld が起動時に書く params で、落ちた時の値が残ることがある。
+      #    上で modelV2 が big で生きていることを確認済みなので、ここに落ちるのはロード直後だけ。
       self.chestnut_state = ChestnutState.FAILED
     else:
       self.chestnut_state = ChestnutState.ACTIVE
