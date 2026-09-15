@@ -49,17 +49,19 @@ class TogglesLayoutMici(NavScroller):
     # DEC (experimental mode の中で ACC と e2e のどちらを使うかをモデルに選ばせる設定) は旧 UI にしか無く、
     # c4 では切り替える手段が無かったのでここに出す。exp との連動は下の set_enabled を参照。
     self._dec_toggle = BigParamControl("dynamic experimental control", "DynamicExperimentalControl")
-    # Lane Centering (StarPilot 由来の幾何補正)。⚠ この 4 つは openpilot の Params ではなく
+    # Lane Centering (StarPilot 由来の幾何補正)。⚠ この 5 つは openpilot の Params ではなく
     # `/data/params_fork/d` に保存している — params に置くと `clearAll` のホワイトリストから外れて
     # manager 起動のたびに消えるため。読み書きは lane_centering_params が持つ。
     # ⚠ 横制御なので DEC/exp の縦制御ゲートには連動させない。
     self._lane_centering_toggle = LaneCenteringToggle("lane centering", lcp.KEY_ENABLED)
-    # 詳細 3 つは親が ON のときだけ出す。⚠ callable を渡すのは、親を押した瞬間に出したいため
+    # 詳細 4 つは親が ON のときだけ出す。⚠ callable を渡すのは、親を押した瞬間に出したいため
     # (_update_toggles は show_event と engaged 遷移でしか回らない)。
     self._lane_centering_details = (
       LaneCenteringChoice("center offset", lcp.KEY_OFFSET, lcp.OFFSET_CHOICES, lcp.offset_label),
       LaneCenteringChoice("yield to model", lcp.KEY_AUTHORITY, lcp.AUTHORITY_CHOICES, lcp.authority_label),
       LaneCenteringToggle("pause on signal", lcp.KEY_PAUSE_ON_SIGNAL),
+      LaneCenteringChoice("high-speed strength", lcp.KEY_HIGHSPEED_GAIN,
+                          lcp.HIGHSPEED_GAIN_CHOICES, lcp.highspeed_gain_label),
     )
     for item in self._lane_centering_details:
       item.set_visible(lambda: self._lane_centering_toggle._checked)
