@@ -230,16 +230,22 @@ class SelfdriveD(CruiseHelper):
     warming_up = self.big_model_loading or time.monotonic() < self.big_model_ready_t + BIG_MODEL_WARMUP
     if warming_up:
       self.events.add(EventName.bigModelLoading)
-    elif self.big_model_ready_t and not self.big_model_announced:
+    elif self.big_model_ready_t and not self.big_model_announced and self.sm.alive['modelV2']:
       # GS450h: Ready の音は warmup 窓が閉じて本当に engage できるようになってから鳴らす。
       # upstream はロード完了の瞬間に鳴らすが、その直後 5 秒は上の窓が NO_ENTRY を出すので
       # 「Ready と言われたのに main を押すと準備中」になる (user 09-01)。
+      # ⚠ さらに modelV2 が実際に流れ出すまで待つ (09-15)。ChestnutActive=True を書いてから
+      #   最初の publish までの数フレームは alive=False なので、下の model_unavailable が真になり
+      #   **Ready と Big Model Failed が同じフレームで両方出る** (user 09-15 に実機で訴え、
+      #   onroadEvents の実測でも bigModelFailed が毎フレーム出ているのを確認した)。
       self.events_sp.add(custom.OnroadEventSP.EventName.bigModelReady)
       self.big_model_announced = True
 
     big_active = self.params.get("ChestnutActive")
     chestnut_present = self.sm['deviceState'].chestnutPresent
-    model_unavailable = big_active is True and self.sm.seen['modelV2'] and not self.sm.alive['modelV2']
+    # ⚠ warmup 中は「まだ流れていないだけ」なので failed にしない (上の Ready と両立させるため)。
+    model_unavailable = (big_active is True and self.sm.seen['modelV2']
+                         and not self.sm.alive['modelV2'] and not warming_up)
     big_failed = big_active is False or model_unavailable or (self.big_model_active and not chestnut_present)
     if big_failed and not self.big_model_failed:
       self.events.add(EventName.bigModelFailed)
