@@ -19,6 +19,7 @@ from tinygrad.tensor import Tensor
 import openpilot.cereal.messaging as messaging
 from openpilot.common.hardware import COMMA_HARDWARE
 from openpilot.selfdrive.modeld.helpers import chestnut_present, reset_chestnut, save_dmesg_snapshot, capture_stdio, save_stdio_snapshot
+from openpilot.selfdrive.modeld.helpers import save_chestnut_snapshot
 from openpilot.cereal import log
 from opendbc.car.structs import car
 from openpilot.cereal.services import SERVICE_LIST
@@ -495,6 +496,7 @@ def main(demo=False):
       # GS450h: 落ちる直前のカーネルログを残す (再起動で dmesg が消えるため)。
       save_stdio_snapshot("-loadfail")
       save_dmesg_snapshot("-loadfail")
+      save_chestnut_snapshot("-loadfail")
       # GS450h: GPU がハングしたままだと何度ロードしても失敗する。USB をリセットしてから死ぬ (reset_chestnut 参照)。
       reset_chestnut()
       # ⚠ 上流 (6831cf5e79) はここで small model へ降格して走り続けるが、GS 450h では採らない:
@@ -691,6 +693,7 @@ if __name__ == "__main__":
     try:
       save_stdio_snapshot("-crash")
       save_dmesg_snapshot("-crash")
+      save_chestnut_snapshot("-crash")
       if Params().get_bool("ChestnutActive"):
         reset_chestnut()
     except Exception:

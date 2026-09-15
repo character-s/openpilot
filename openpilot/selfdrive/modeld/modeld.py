@@ -34,6 +34,7 @@ from openpilot.common.file_chunker import open_file_chunked
 from openpilot.common.hardware.usb import CHESTNUT_USB_IDS
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
 from openpilot.selfdrive.modeld.helpers import chestnut_present, chestnut_compiled, chestnut_ready, modeld_pkl_path, load_oob
+from openpilot.selfdrive.modeld.helpers import record_chestnut_sample
 
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
@@ -163,6 +164,9 @@ class ChestnutState:
 
     msg.valid = asm_valid and (not self.big or self.valid)
     self.pm.send('chestnutState', msg)
+    # GS450h: Device hang は前兆なく起きるので、落ちる側で最後の 1 件を憶えておく。
+    # crash 時に save_chestnut_snapshot() が crash ログの隣に書き出す (rlog を回収せずに読める)。
+    record_chestnut_sample(state, msg.valid)
 
 
 class FrameMeta:

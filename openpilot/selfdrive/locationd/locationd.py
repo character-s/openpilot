@@ -30,6 +30,9 @@ POSENET_STD_INITIAL_VALUE = 10.0
 POSENET_STD_HIST_HALF = 20
 CAM_ODO_POSE_DELAY = 0.1 # dependent on the vision model context frames and temporal frequency (current model is 5 fps with 2 context frames)
 CAM_ODO_ROT_STD_MULT = 10
+# GS450h: cameraOdometry が戻っているのに inputsOK=False のまま復帰しなくなったときに自死するまでの時間。
+# ⚠ カメラが来ている間しか数えないので、modeld のロード待ち (80-150s) では進まない。
+STUCK_INPUTS_TIMEOUT = 30.0 # s
 CAM_ODO_TRANS_STD_MULT = 4
 
 
@@ -280,6 +283,7 @@ def main():
   filter_initialized = False
   critcal_services = ["accelerometer", "gyroscope", "cameraOdometry"]
   observation_input_invalid = defaultdict(int)
+  inputs_invalid_since: float | None = None  # GS450h: stuck 検出 (STUCK_INPUTS_TIMEOUT 参照)
 
   input_invalid_limit = {s: round(INPUT_INVALID_LIMIT * (SERVICE_LIST[s].frequency / 20.)) for s in critcal_services}
   input_invalid_threshold = {s: input_invalid_limit[s] - 0.5 for s in critcal_services}
@@ -334,6 +338,21 @@ def main():
 
       msg = estimator.get_msg(sensors_valid, inputs_valid, filter_initialized)
       pm.send("deviceMotion", msg)
+
+      # GS450h: modeld が繰り返し死ぬと locationd が道連れになり、cameraOdometry が戻って
+      # 入力が全部 valid・失敗カウンタも 0 なのに inputsOK=False のまま復帰しないことがある
+      # (09-15 実測。この状態では locationdTemporaryError で engage できない)。
+      # ⚠ 生き続けても engage できない = 失うものが無いので、自分で落ちて manager に作り直させる
+      #    (process_config で restart_on_crash=True。倍々 backoff が付くので暴走はしない)。
+      # ⚠ ここは cameraOdometry が来ている間しか通らないので、modeld のロード待ちでは発火しない。
+      # ⚠ filter 初期化前は inputs_valid が False でも正常なので数えない。
+      if inputs_valid or not filter_initialized:
+        inputs_invalid_since = None
+      elif inputs_invalid_since is None:
+        inputs_invalid_since = time.monotonic()
+      elif time.monotonic() - inputs_invalid_since > STUCK_INPUTS_TIMEOUT:
+        cloudlog.error(f"locationd stuck with inputsOK=False for {STUCK_INPUTS_TIMEOUT}s, exiting to be restarted")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

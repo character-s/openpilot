@@ -197,12 +197,13 @@ class NativeProcess(ManagerProcess):
 
 
 class PythonProcess(ManagerProcess):
-  def __init__(self, name, module, should_run, enabled=True, sigkill=False):
+  def __init__(self, name, module, should_run, enabled=True, sigkill=False, restart_on_crash=False):
     self.name = name
     self.module = module
     self.should_run = should_run
     self.enabled = enabled
     self.sigkill = sigkill
+    self.restart_on_crash = restart_on_crash
     self.launcher = launcher
 
   def start(self) -> None:
@@ -210,6 +211,10 @@ class PythonProcess(ManagerProcess):
     if self.shutting_down:
       self.stop()
 
+    # GS450h: NativeProcess と同じくクラッシュ済みの proc を掃除して再起動できるようにする
+    # (upstream は proc が残っている限り下の return で no-op になる)。
+    # ⚠ restart_on_crash=False のプロセスでは reap_if_crashed が即 return するので挙動は変わらない。
+    self.reap_if_crashed()
     if self.proc is not None:
       return
 
