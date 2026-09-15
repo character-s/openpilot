@@ -3,7 +3,7 @@ from unittest import mock
 
 from openpilot.common.test import OpenpilotTestCase
 import openpilot.system.manager.process as process_mod
-from openpilot.system.manager.process import ManagerProcess
+from openpilot.system.manager.process import ManagerProcess, PythonProcess
 
 
 class _Proc(ManagerProcess):
@@ -93,3 +93,52 @@ class TestRestartOnCrash(OpenpilotTestCase):
   def test_ignores_while_shutting_down(self):
     self.p.shutting_down = True
     self.assertFalse(self._crash())
+
+
+class TestPythonProcessRestartOnCrash(OpenpilotTestCase):
+  """GS450h: PythonProcess でも restart_on_crash が効く (locationd の stuck からの復帰に使う)。
+
+  09-15 に locationd を kill したら二度と上がらず、c4 の再起動でしか戻せなかった。
+  locationd は modeld (poll='cameraOdometry') の死に道連れになり inputsOK=False のまま
+  復帰しないことがあるので、自分で落ちて manager に作り直させる経路を用意する。
+  """
+
+  @staticmethod
+  def _proc(**kwargs) -> PythonProcess:
+    return PythonProcess("locationd", "openpilot.selfdrive.locationd.locationd", lambda *a: True, **kwargs)
+
+  def _start(self, p: PythonProcess):
+    with mock.patch.object(process_mod, "Process") as mock_process, \
+         mock.patch.object(process_mod.cloudlog, "error"), \
+         mock.patch.object(process_mod.cloudlog, "info"):
+      p.start()
+    return mock_process.called
+
+  def test_flag_defaults_to_off(self):
+    self.assertFalse(self._proc().restart_on_crash)
+
+  def test_flag_can_be_enabled(self):
+    self.assertTrue(self._proc(restart_on_crash=True).restart_on_crash)
+
+  def test_start_reaps_crashed_proc(self):
+    """crash 済みの proc が残っていても start() が掃除して起動し直す (upstream はここで詰まる)。"""
+    p = self._proc(restart_on_crash=True)
+    p.proc = SimpleNamespace(exitcode=1)
+    self.assertTrue(self._start(p))
+
+  def test_start_does_not_reap_without_the_flag(self):
+    """既定 (False) のプロセスの挙動は変えない = 落ちたままにする。"""
+    p = self._proc()
+    p.proc = SimpleNamespace(exitcode=1)
+    self.assertFalse(self._start(p))
+
+  def test_start_is_noop_while_running(self):
+    """生きているプロセスを二重起動しない。"""
+    p = self._proc(restart_on_crash=True)
+    p.proc = SimpleNamespace(exitcode=None)
+    self.assertFalse(self._start(p))
+
+  def test_locationd_is_configured_to_restart(self):
+    """process_config 側で実際に有効になっていること (ここが外れると kill したきり戻らない)。"""
+    from openpilot.system.manager.process_config import managed_processes
+    self.assertTrue(managed_processes["locationd"].restart_on_crash)

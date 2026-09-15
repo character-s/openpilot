@@ -127,7 +127,10 @@ procs = [
   PythonProcess("sensord", "openpilot.system.sensord.sensord", only_onroad, enabled=not PC),
   PythonProcess("ui", "openpilot.selfdrive.ui.ui", always_run),
   PythonProcess("soundd", "openpilot.selfdrive.ui.soundd", driverview),
-  PythonProcess("locationd", "openpilot.selfdrive.locationd.locationd", only_onroad),
+  # GS450h: locationd は poll='cameraOdometry' で回るので modeld の死に道連れになり、入力が戻っても
+  # inputsOK=False のまま復帰しないことがある (09-15 実測)。stuck を自分で検出して落ちるようにしたので、
+  # manager 側でも作り直せるようにする。⚠ これが無いと kill したきり二度と上がってこない。
+  PythonProcess("locationd", "openpilot.selfdrive.locationd.locationd", only_onroad, restart_on_crash=True),
   NativeProcess("_pandad", "openpilot/selfdrive/pandad", ["./pandad"], always_run, enabled=False),
   PythonProcess("calibrationd", "openpilot.selfdrive.locationd.calibrationd", only_onroad),
   PythonProcess("torqued", "openpilot.selfdrive.locationd.torqued", only_onroad),
