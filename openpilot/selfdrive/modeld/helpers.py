@@ -156,7 +156,8 @@ def _probe_chestnut_now() -> dict:
   except Exception as exc:
     probe["pcieLtssm"] = f"ERR {exc!r}"
   try:
-    volt, curr, fault = struct.unpack('<Hh?', bytes(iface.pci_dev.usb.control_read(0xC0, 5)))
+    # ⚠ usb が 2 段 (`pci_dev.usb.usb`)。ChestnutState._read_ina と同じ経路で読むこと。
+    volt, curr, fault = struct.unpack('<Hh?', bytes(iface.pci_dev.usb.usb.control_read(0xC0, 5)))
     probe["supplyVoltage"], probe["supplyCurrent"], probe["supplyFault"] = volt, curr, fault
   except Exception as exc:
     probe["supply"] = f"ERR {exc!r}"
@@ -171,12 +172,33 @@ def _probe_chestnut_now() -> dict:
   return probe
 
 
+def _read_vehicle_12v() -> dict:
+  """車両 12V 系 (peripheralState) をその場で 1 件読む (GS450h 追加)。
+
+  ⚠⚠ これが要る理由: chestnutState の supplyVoltage は **XT60 入力 = PD 充電器の出力**で、
+     そこが 11.3V に落ちてハングした (09-15 実測)。だが「充電器が勝手に止まった」のか
+     「入力の 12V が落ちて充電器が保護に入った」のかは、車両側を見ないと分けられない。
+     シガーソケット経由なので接触・ヒューズ・配線の電圧降下が容疑者に残っている。
+  ⚠ modeld は peripheralState を購読していないので、crash 経路でその場で 1 件だけ取る。
+  """
+  try:
+    from openpilot.cereal import messaging
+    sock = messaging.sub_sock('peripheralState', timeout=300)
+    msg = messaging.recv_one_or_none(sock)
+    if msg is None:
+      return {"note": "no peripheralState"}
+    return {"voltage": msg.peripheralState.voltage, "current": msg.peripheralState.current}
+  except Exception as exc:
+    return {"err": repr(exc)}
+
+
 def save_chestnut_snapshot(tag: str = "") -> Path | None:
   """ハングした瞬間の GPU テレメトリ + ハング後の応答性を crash ログの隣に残す (GS450h 追加)。
 
   ⚠ 例外は投げない。保存できなくても modeld の終了処理を止めない。
   """
-  snapshot: dict = {"last_sample": _last_chestnut_sample, "after_hang": _probe_chestnut_now()}
+  snapshot: dict = {"last_sample": _last_chestnut_sample, "after_hang": _probe_chestnut_now(),
+                    "vehicle_12v_after_hang": _read_vehicle_12v()}
   try:
     return _write_crash_file("chestnut", tag, json.dumps(snapshot, indent=2, default=str))
   except Exception:
