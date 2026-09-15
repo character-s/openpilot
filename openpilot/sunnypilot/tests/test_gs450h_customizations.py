@@ -471,6 +471,25 @@ def test_lane_centering_lowspeed_schedule_survives():
     '_LOWSPEED_V が定義されているだけで使われていない = 定数だけ載って本体が落ちた'
 
 
+
+def test_lane_centering_highspeed_schedule_survives():
+  """高速 (61-79km/h) だけゲインを上げ、同じ区間で authority の引っ込めを外すスケジュール (09-16 追加)。
+
+  ⚠ **既定は x2.0 (user 09-16 決定)**。⚠⚠ **standard (0.30) = 従来と 1 bit も同じ状態へ戻す退避先**が
+  選択肢から消えていないことを固定する (実走で悪かったときに UI だけで戻せることが要)。
+  """
+  assert _literal(LC_PY, '_HIGHSPEED_V') == (17.0, 22.0)
+  assert _literal(LC_PY, '_MAX_HIGHSPEED_GAIN') == 0.80
+  assert _literal(LC_PY, '_HIGHSPEED_AUTHORITY_SCALE') == 0.0
+  assert _literal(LC_PARAMS_PY, 'HIGHSPEED_GAIN_CHOICES') == (0.30, 0.45, 0.60, 0.80)
+  assert _literal(LC_PARAMS_PY, 'KEY_HIGHSPEED_GAIN') == 'LaneCenteringHighSpeedGain'
+  assert _literal(LC_PY, '_MAX_GAIN') in _literal(LC_PARAMS_PY, 'HIGHSPEED_GAIN_CHOICES'), 'standard (従来と同一) へ戻す選択肢が消えている'
+  src = _read(LC_PY)
+  assert '_authority_scale_for(v_ego, highspeed_gain)' in src,     'authority の速度スケジュールが呼ばれていない = 定数だけ載って本体が落ちた'
+  assert '_gain_for(v_ego, highspeed_gain)' in src,     'ゲインに設定値が渡っていない = 高速スケジュールが死んでいる'
+  assert 'KEY_HIGHSPEED_GAIN' in _read(MICI_TOGGLES_PY), 'UI に高速強度の行が載っていない'
+
+
 # ===========================================================================
 # 4) modeld (chestnut / eGPU)
 # ===========================================================================
