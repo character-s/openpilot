@@ -37,6 +37,7 @@ from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_drivi
 from openpilot.common.file_chunker import open_file_chunked
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
 from openpilot.selfdrive.modeld.helpers import MODELS_DIR, chestnut_present, chestnut_compiled, modeld_pkl_path, load_oob
+from openpilot.selfdrive.modeld.helpers import record_chestnut_sample
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.relc import RoadEdgeLaneChangeController
@@ -121,6 +122,11 @@ class ChestnutGpuState:
 
     msg.valid = not self.big or (self.valid and bool(self.metrics))
     self.pm.send('chestnutGpuState', msg)
+    # GS450h: Device hang は前兆なく起きるので、落ちる側で最後の 1 件を憶えておく。
+    # crash 時に save_chestnut_snapshot() が crash ログの隣に書き出す (rlog を回収せずに読める)。
+    # ⚠ 10-08 追従: 電源系 (supplyVoltage / pcieLtssm) は hardwared の chestnut_state_thread が chestnutState として
+    #   別に publish するようになり、modeld のこの msg には GPU 計測しか載らない (電源は _probe_chestnut_now が USB から直接読む)。
+    record_chestnut_sample(state, msg.valid)
 
 
 class FrameMeta:
