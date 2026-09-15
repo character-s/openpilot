@@ -2,6 +2,7 @@
 import fcntl
 import json
 import logging
+import logging.handlers
 import os
 import select
 import signal
@@ -17,10 +18,23 @@ from ipaddress import IPv4Address, AddressValueError
 
 from enum import Enum
 
+# GS450h: manager の子プロセスの stdout はどこにも残らないので、SIM が読めなくなった経緯を
+# 後から追えない (09-15 に 2 回踏んで、どちらも状態ファイルが凍結していることでしか気付けなかった)。
+# /data にも吐いて ssh 1 回で読めるようにする。⚠ /data の空きは多くないので 256KB x 2 世代に抑える。
+MODEM_LOG = "/data/community/modem.log"
+
+_log_handlers: list[logging.Handler] = [logging.StreamHandler()]
+try:
+  os.makedirs(os.path.dirname(MODEM_LOG), exist_ok=True)
+  _log_handlers.append(logging.handlers.RotatingFileHandler(MODEM_LOG, maxBytes=256 * 1024, backupCount=1))
+except OSError:
+  pass  # 書けない環境 (PC / テスト) では stdout だけで動かす
+
 logging.basicConfig(
   level=logging.INFO,
   format="%(asctime)s.%(msecs)03d %(levelname)-7s modem: %(message)s",
-  datefmt="%H:%M:%S",
+  datefmt="%m-%d %H:%M:%S",  # ファイルに残すので日付も入れる (⚠ 起動直後は RTC 既定値で日付が化ける)
+  handlers=_log_handlers,
 )
 
 AT_PORT = "/dev/modem_at0"
@@ -109,6 +123,14 @@ class State(Enum):
 
 
 STATE_WAIT = 1.0  # seconds to wait after each state handler returns
+
+# GS450h: 起動時に SIM を掴み損ねると AT+CPIN? / AT+QCCID が +CME ERROR: 13 (SIM failure) を返し続け、
+# _read_identity() が永久に失敗して INITIALIZING から出られなくなる (09-15 に 2 回。どちらもブート
+# 14.5 秒で state が凍結し、37 分待っても直らなかった)。AT+CFUN=0/1 でラジオを入れ直すと SIM が
+# 読めるようになるのを実車で確認したので、リトライだけで粘らずに一度入れ直す。
+SIM_READ_FAILS_BEFORE_RESET = 10  # identity 読みの連続失敗がこの回数に達したら CFUN で入れ直す
+RADIO_OFF_WAIT = 4.0   # [s] AT+CFUN=0 のあと待つ時間
+RADIO_ON_WAIT = 12.0   # [s] AT+CFUN=1 のあと SIM とネットワークが立ち上がるまで待つ時間
 
 
 class PPPSession:
@@ -214,6 +236,7 @@ class Modem:
     self._sim_change = False
     self._apn = ""  # blank = network-provided via PCO
     self._roaming_allowed = True
+    self._sim_read_fails = 0  # GS450h: SIM_READ_FAILS_BEFORE_RESET 参照
     self.running = True
     self.S = INITIAL_STATE.copy()
 
@@ -316,6 +339,21 @@ class Modem:
     for c in cmds:
       self._at(c)
 
+  def _reset_radio_if_sim_unreadable(self):
+    """GS450h: SIM が読めないまま粘り続けるのをやめて、ラジオを入れ直す (SIM_READ_FAILS_BEFORE_RESET 参照)。
+
+    ⚠ 起動直後の 1-2 回の失敗はモデム側の初期化待ちなので、すぐには打たない。
+    ⚠ AT+CFUN=0/1 は SIM とネットワーク登録をやり直すだけで、プロファイル (eSIM) には触らない。
+    """
+    self._sim_read_fails += 1
+    if self._sim_read_fails % SIM_READ_FAILS_BEFORE_RESET:
+      return
+    logging.warning(f"SIM unreadable after {self._sim_read_fails} tries, power-cycling the radio (AT+CFUN=0/1)")
+    self._at("AT+CFUN=0")
+    time.sleep(RADIO_OFF_WAIT)
+    self._at("AT+CFUN=1")
+    time.sleep(RADIO_ON_WAIT)
+
   def _do_initializing(self):
     if not os.path.exists(AT_PORT):
       return State.INITIALIZING
@@ -330,7 +368,9 @@ class Modem:
     identity = self._read_identity()
     if not identity["iccid"] or not identity["imei"]:
       logging.warning(f"identity read incomplete: {identity}, retrying")
+      self._reset_radio_if_sim_unreadable()
       return State.INITIALIZING
+    self._sim_read_fails = 0
 
     self._configure_modem(identity["modem_version"])
 
