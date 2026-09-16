@@ -39,6 +39,7 @@ LONG_MPC_PY = 'openpilot/selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py
 # acados が生成した cost 関数。STOP_DISTANCE はここに焼き付いており、実機が見るのはこちら
 LONG_COST_C = 'openpilot/selfdrive/controls/lib/longitudinal_mpc_lib/c_generated_code/long_cost/long_cost_y_fun.c'
 MODELD_PY = 'openpilot/sunnypilot/modeld_v2/modeld.py'
+CHESTNUT_POWER_PY = 'openpilot/sunnypilot/modeld_v2/chestnut_power_limit.py'
 NNLC_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/nnlc/nnlc.py'
 TORQUE_EXT_BASE_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/latcontrol_torque_ext_base.py'
 SCC_VISION_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/smart_cruise_control/vision_controller.py'
@@ -499,6 +500,26 @@ def test_egpu_load_resilience_survives():
   assert _literal(MODELD_PY, 'BIG_MODEL_TIMEOUT') == 150
   assert _literal(MODELD_PY, 'EGPU_LOAD_ATTEMPTS') == 5
   assert _literal(MODELD_PY, 'EGPU_LOCK_RETRY_WAIT') == 3.0
+
+
+def test_chestnut_power_limit_survives():
+  """パッケージ電力の上限 (09-16 追加)。
+
+  ⚠ stock は実測 **170W** で、GPU の定常が 48-50W なのに入力へ瞬間 116W を要求する
+  = PD 充電器の定格 (20V/5A) 超え ⇒ 給電が落ちて `Device hang detected` になる。
+  上流 #2023 が同型機で「無制限は 46s で毎回 hang / 60W cap で 0 件」を実測している。
+  ⚠⚠ **既定 80W**。⚠⚠ **0 を書けば stock に戻せる**退避先が消えていないこと
+  (`get_power_limit` の `<= 0` 分岐) — 実走で性能が落ちたとき c4 上のファイル 1 本で戻せることが要。
+  ⚠ 値は `/data/params_fork` 側に置く (openpilot の Params は manager 起動のたびに消える)。
+  """
+  assert _literal(CHESTNUT_POWER_PY, 'DEFAULT_LIMIT_W') == 80
+  assert _literal(CHESTNUT_POWER_PY, 'POWER_LIMIT_MIN_W') == 40
+  assert _literal(CHESTNUT_POWER_PY, 'POWER_LIMIT_MAX_W') == 100
+  assert _literal(CHESTNUT_POWER_PY, 'KEY_POWER_LIMIT') == 'ChestnutPowerLimit'
+  assert _literal(CHESTNUT_POWER_PY, 'PARAM_DIR') == '/data/params_fork/d', 'openpilot の Params に戻すと manager 起動のたびに消える'
+  src = _read(MODELD_PY)
+  assert 'apply_power_limit(get_power_limit())' in src, '電力上限の適用が big のロードから外れている'
+  assert _read(CHESTNUT_POWER_PY).count('limit_w <= 0') >= 1, 'stock (0) へ戻す分岐が消えている'
 
 
 def test_long_smooth_cap_survives():
