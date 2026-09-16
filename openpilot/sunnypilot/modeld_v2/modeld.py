@@ -49,6 +49,7 @@ from openpilot.sunnypilot.modeld_v2.parse_model_outputs import Parser
 from openpilot.sunnypilot.modeld_v2.constants import ModelConstants, Plan
 from openpilot.sunnypilot.modeld_v2.meta_helper import load_meta_constants
 from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper
+from openpilot.sunnypilot.modeld_v2.chestnut_power_limit import apply_power_limit, get_power_limit
 from openpilot.sunnypilot.modeld_v2.compile_modeld import (derive_frame_skip, make_split_input_queues,
                                                            make_supercombo_input_queues, nv12_copy_size,
                                                            WARP_INPUTS, POLICY_INPUTS)
@@ -476,6 +477,10 @@ def main(demo=False):
     result: list = []
 
     def make_big():
+      # GS450h: 転送と推論の前にパッケージ電力を絞る。stock の 170W はブースト時に入力へ
+      # 瞬間 116W を要求し、PD 充電器の定格を超えて給電が落ちる (chestnut_power_limit 参照)。
+      # ⚠ 失敗しても続行する (絞れなくても従来どおり動く)。効いたかは chestnutState.powerLimitW で見る。
+      apply_power_limit(get_power_limit())
       m = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=True)
       m.warmup()
       return m
