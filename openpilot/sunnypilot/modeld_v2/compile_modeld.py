@@ -7,12 +7,14 @@ See the LICENSE.md file in the root directory for more details.
 """
 
 import argparse
+import atexit
 import codecs
 import gc
 import math
 import multiprocessing as mp
 import os
 import pickle
+import shutil
 import tempfile
 import time
 from functools import partial
@@ -20,8 +22,8 @@ from typing import Any
 
 import numpy as np
 
-from openpilot.sunnypilot.modeld_v2.helpers import PlainJit, patch_fetch_fw, read_parts, write_bundle
-from openpilot.sunnypilot.modeld_v2.plain_artifact_compiler import capture_frame, record_kernel_linear, serialize_jit
+from openpilot.common.file_chunker import chunk_file, get_chunk_targets, open_file_chunked
+from openpilot.sunnypilot.modeld_v2.helpers import dump_oob, load_oob
 import openpilot.sunnypilot.modeld_v2.stock_dependencies as stock
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 
@@ -34,7 +36,34 @@ from tinygrad.tensor import Tensor
 
 os.environ['GMMU'] = '0'
 
-patch_fetch_fw()
+def _patch_tinygrad_fetch_fw():
+  try:
+    import hashlib
+    import pathlib
+    import zstandard
+    from tinygrad import helpers
+    _orig_fetch_fw = helpers.fetch_fw
+    def fetch_fw(path, name, sha256):
+      p = pathlib.Path(f"/lib/firmware/{path}/{name}.zst")
+      if p.is_file():
+        blob = zstandard.ZstdDecompressor().stream_reader(p.read_bytes()).read()
+        if hashlib.sha256(blob).hexdigest() == sha256:
+          return blob
+      return _orig_fetch_fw(path, name, sha256)
+    helpers.fetch_fw = fetch_fw
+  except ImportError:
+    pass
+_patch_tinygrad_fetch_fw()
+
+def _patch_ops_serialization():
+  try:
+    from tinygrad.uop.ops import Ops
+    def __reduce_ex__(self, proto):
+      return (getattr, (self.__class__, self.name))
+    Ops.__reduce_ex__ = __reduce_ex__
+  except ImportError:
+    pass
+_patch_ops_serialization()
 
 MODEL_TYPES = ('vision_policy', 'supercombo', 'vision_multi_policy')
 WARP_INPUTS = ['tfm', 'big_tfm']
@@ -43,7 +72,6 @@ POLICY_INPUTS = ['img_q', 'big_img_q', 'feat_q', 'desire_q', 'packed_npy_inputs'
 class MetadataOnnxPBParser(OnnxPBParser):
   def _parse_ModelProto(self) -> dict:
     obj: dict[str, Any] = {"graph": {"input": [], "output": []}, "metadata_props": []}
-    self.opset_imports = {}
     for fid, wire_type in self._parse_message(self.reader.len):
       match fid:
         case 7:
@@ -122,12 +150,15 @@ def get_policy_npy_shapes(input_shapes: dict, is_supercombo: bool = False) -> tu
   return shapes, sizes
 
 
-def host_view(tensor: Tensor) -> np.ndarray: # QCOM -> CPU round trip of tfm takes 5ms longer than host memory view
-  return np.frombuffer(tensor._buffer()._host_mv(), dtype=np.float32).reshape(tensor.shape)
-
-
-def generate_queues_and_npy(input_shapes: dict, frame_skip: int, device: str = Device.DEFAULT,
+def generate_queues_and_npy(input_shapes: dict, frame_skip: int, device: str | None = None,
                             is_supercombo: bool = False) -> tuple[dict, dict]:
+  # ⚠⚠ device の既定は **None**。`Device.DEFAULT` を既定引数に書くと import 時に 1 度だけ評価され、
+  #    modeld を起動した瞬間に tinygrad が AMD backend を open しに行く (upstream #1964 の真因。
+  #    sunnypilot #2033 / tinygrad #18205 で修正中)。cold boot では PCIe のリンクトレーニングと競合して
+  #    失敗し、**flock と USB claim を掴んだまま解放しない** ⇒ 数秒後の本番 load が自分自身の fd で
+  #    ブロックされ、`_load_with_retry` のリトライでは原理的に救えない (09-17 に実車で 45 分ハマった)。
+  #    ⇒ **実際に使う直前まで Device.DEFAULT に触らない**。
+  device = device or Device.DEFAULT
   road_key, _ = _detect_vision_keys(input_shapes)
   if not road_key:
     raise ValueError("Vision road key missing from input shapes.")
@@ -161,7 +192,7 @@ def generate_queues_and_npy(input_shapes: dict, frame_skip: int, device: str = D
     'big_img_q': Tensor(np.zeros(img_buf_shape, dtype=np.uint8), device=device).contiguous().realize(),
     'desire_q': Tensor(np.zeros((frame_skip * desire_shape[1], desire_shape[0], desire_shape[2]),
                   dtype=np.float32), device=device).contiguous().realize(),
-    'packed_npy_inputs': Tensor(packed_npy_inputs, device=device).realize(),
+    'packed_npy_inputs': Tensor(packed_npy_inputs, device=device if os.getenv('CHESTNUT') else 'NPY').realize(),
   }
 
   if features_buffer:
@@ -173,20 +204,18 @@ def generate_queues_and_npy(input_shapes: dict, frame_skip: int, device: str = D
   for key in ('tfm', 'big_tfm'):
     if key not in npy_arrays:
       npy_arrays[key] = np.eye(3, dtype=np.float32)
-    queues[key] = Tensor(npy_arrays[key], device=device).realize()
+    queues[key] = Tensor(npy_arrays[key], device='NPY').realize()
 
-  packed = host_view(queues['packed_npy_inputs'])
-  npy_arrays |= {k: v.reshape(s) for (k, s), v in zip(shapes.items(), np.split(packed, split_indices) if sizes else [], strict=True)}
-  return queues, npy_arrays | {k: host_view(queues[k]) for k in ('tfm', 'big_tfm')}
+  return queues, npy_arrays
 
 
 def make_split_input_queues(vision_input_shapes: dict, policy_input_shapes: dict,
-                            frame_skip: int, device: str = Device.DEFAULT) -> tuple[dict, dict]:
+                            frame_skip: int, device: str | None = None) -> tuple[dict, dict]:
   return generate_queues_and_npy({**vision_input_shapes, **policy_input_shapes}, frame_skip, device, is_supercombo=False)
 
 
 def make_supercombo_input_queues(input_shapes: dict, frame_skip: int,
-                                 device: str = Device.DEFAULT) -> tuple[dict, dict]:
+                                 device: str | None = None) -> tuple[dict, dict]:
   return generate_queues_and_npy(input_shapes, frame_skip, device, is_supercombo=True)
 
 
@@ -194,13 +223,13 @@ def make_random_images(keys, shape, device, rng=None):
   return {k: Tensor.randint(shape, low=0, high=256, dtype=dtypes.uint8, device=device).realize() for k in keys}
 
 
-def make_warp_queues(device=Device.DEFAULT):
+def make_warp_queues(device=None):
   npy = {
     'tfm': np.zeros((3, 3), dtype=np.float32),
     'big_tfm': np.zeros((3, 3), dtype=np.float32),
   }
-  queues = {k: Tensor(v, device=device).realize() for k, v in npy.items()}
-  return queues, {k: host_view(v) for k, v in queues.items()}
+  queues = {k: Tensor(v, device='NPY').realize() for k, v in npy.items()}
+  return queues, npy
 
 
 def make_run_policy(vision_runner, policy_runners: list, features_slice: slice, frame_skip: int, input_shapes: dict):
@@ -260,19 +289,8 @@ def make_run_policy(vision_runner, policy_runners: list, features_slice: slice, 
   return run_policy
 
 
-class _CheckFrameRecorder:
-  def __init__(self, jit):
-    self.jit, self.frame = jit, None
-
-  def __call__(self, *args, **kwargs):
-    if self.frame is not None or args or self.jit.cnt < 2:
-      return self.jit(*args, **kwargs)
-    self.frame, result = capture_frame(self.jit, kwargs, None)
-    return result
-
-
 def compile_jit(jit_or_fn, input_keys_or_make_inputs, make_queues=None, make_random_inputs=None,
-                benchmark_runs: int = 1, clear_refs=None):
+                benchmark_runs: int = 1, clear_refs=None, return_loaded: bool = True):
   if callable(input_keys_or_make_inputs) and make_queues is None:
     fn = jit_or_fn
     make_inputs = input_keys_or_make_inputs
@@ -323,28 +341,37 @@ def compile_jit(jit_or_fn, input_keys_or_make_inputs, make_queues=None, make_ran
 
   print('capture + replay')
   gc.collect()
-  recorder = _CheckFrameRecorder(jit)
-  with record_kernel_linear() as recorded:
-    test_val = run_eval(recorder, 42, 3)
-  assert len(recorded) == 1, f"expected one captured kernel list, got {len(recorded)}"
-  part = serialize_jit(jit, recorded[0], recorder.frame)
-  print(f'plain artifact round trip ({benchmark_runs} runs per seed)')
-  if clear_refs:
-    clear_refs()
-  gc.collect()
-  loaded_jit = PlainJit(part[0], memoryview(part[1]))
+  test_val = run_eval(jit, 42, 3)
+  print(f'pickle round trip ({benchmark_runs} runs per seed)')
+  with tempfile.TemporaryFile(dir=".") as f:
+    dump_oob(jit, f)
+    if clear_refs:
+      clear_refs()
+    gc.collect()
+    f.seek(0)
+    loaded_jit = load_oob(f)
 
   for seed in (42, 43):
     reference = test_val if seed == 42 else run_eval(jit_or_fn, seed, 1)
     actual = run_eval(loaded_jit, seed, benchmark_runs)
     for ref, val in zip(reference, actual, strict=True):
       np.testing.assert_array_equal(ref, val)
-  return part
+  return loaded_jit if return_loaded else jit
 
 
 def _parse_size(size_str: str) -> tuple[int, int]:
   width, height = size_str.lower().split('x')
   return int(width), int(height)
+
+
+def read_file_chunked_to_disk(path):
+  if not path:
+    return None
+  tmp_path = f'{path}.unchunked'
+  with open(tmp_path, 'wb') as f, open_file_chunked(path) as src:
+    shutil.copyfileobj(src, f)
+  atexit.register(lambda: os.path.exists(tmp_path) and os.remove(tmp_path))
+  return tmp_path
 
 
 def _load_policy_runners(args: argparse.Namespace) -> tuple[list, list]:
@@ -367,7 +394,10 @@ def _compile_warp_resolution_worker(cam_w, cam_h, model_w, model_h, benchmark_ru
     warp = None
   compiled_jit = compile_jit(warp, WARP_INPUTS, make_warp_queues, make_random_inputs=make_random_warp_inputs,
                             benchmark_runs=benchmark_runs, clear_refs=cleanup_warp)
-  write_bundle(result_path, {(cam_w, cam_h): compiled_jit}, {'device': Device.DEFAULT})
+
+  result_data = (compiled_jit, Device.DEFAULT)
+  with open(result_path, "wb") as f:
+    dump_oob(result_data, f)
 
 
 if __name__ == "__main__":
@@ -398,6 +428,12 @@ if __name__ == "__main__":
   model_w, model_h = args.model_size
   output_data = {}
 
+  args.vision_onnx = read_file_chunked_to_disk(args.vision_onnx)
+  args.policy_onnx = read_file_chunked_to_disk(args.policy_onnx)
+  args.off_policy_onnx = read_file_chunked_to_disk(args.off_policy_onnx)
+  args.on_policy_onnx = read_file_chunked_to_disk(args.on_policy_onnx)
+  args.supercombo_onnx = read_file_chunked_to_disk(args.supercombo_onnx)
+
   is_unified_supercombo = False
   if args.model_type == 'supercombo':
     assert args.supercombo_onnx
@@ -420,10 +456,8 @@ if __name__ == "__main__":
                                   frame_copy_size=frame_copy_size)
       warp = stock.make_warp(nv12, model_w, model_h)
       run_model_jit = TinyJit(stock.make_run_model(warp, run_policy, model_metadata, frame_copy_size), prune=True)
-      write_bundle(part_path := f"{args.output}.{cam_w}x{cam_h}", {(cam_w, cam_h): compile_jit(run_model_jit, stock.MODELD_INPUTS, make_model_queues,
-                                                                                               benchmark_runs=args.benchmark_runs)})
-      output_data[(cam_w, cam_h)] = read_parts(part_path)[0][(cam_w, cam_h)]
-      os.remove(part_path)
+      compiled_jit = compile_jit(run_model_jit, stock.MODELD_INPUTS, make_model_queues, benchmark_runs=args.benchmark_runs, return_loaded=False)
+      output_data[(cam_w, cam_h)] = compiled_jit
       gc.collect()
     del model_runner, run_policy
     gc.collect()
@@ -491,12 +525,18 @@ if __name__ == "__main__":
 
       tmp_files.append((cam_w, cam_h, tmp_res.name))
     for cam_w, cam_h, tmp_name in tmp_files:
-      warp_parts, warp_extras = read_parts(tmp_name)
-      output_data[(cam_w, cam_h)] = warp_parts[(cam_w, cam_h)]
-      output_data['input_devices']['warp'] = warp_extras['device']
+      with open(tmp_name, "rb") as f:
+        compiled_jit, dev_name = load_oob(f)
+      output_data[(cam_w, cam_h)] = compiled_jit
+      output_data['input_devices']['warp'] = dev_name
       os.remove(tmp_name)
     output_data['metadata']['warp_dev'] = Device.DEFAULT
 
-  parts = {key: output_data.pop(key) for key in [key for key, value in output_data.items() if isinstance(value, tuple)]}
-  write_bundle(args.output, parts, output_data)
-  print(f"Saved model to {args.output} ({os.path.getsize(args.output) / 1e6:.2f} MB, {len(parts)} JITs)")
+  with open(args.output, "wb") as file:
+    dump_oob(output_data, file)
+
+  pkl_size = os.path.getsize(args.output)
+  print(f"Saved combined JIT to {args.output} ({pkl_size / 1e6:.2f} MB)")
+  chunk_targets = get_chunk_targets(args.output, pkl_size)
+  chunk_file(args.output, chunk_targets)
+  print(f"Chunked into {len(chunk_targets) - 1} file(s)")
