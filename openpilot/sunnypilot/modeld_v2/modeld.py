@@ -50,6 +50,8 @@ from openpilot.sunnypilot.modeld_v2.constants import ModelConstants, Plan
 from openpilot.sunnypilot.modeld_v2.meta_helper import load_meta_constants
 from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper
 from openpilot.sunnypilot.modeld_v2.chestnut_power_limit import apply_power_limit, get_power_limit
+from openpilot.sunnypilot.modeld_v2.chestnut_selfheal import (is_self_locked, note_load_failure,
+                                                              note_load_success, request_reboot)
 from openpilot.sunnypilot.modeld_v2.compile_modeld import (derive_frame_skip, make_split_input_queues,
                                                            make_supercombo_input_queues, nv12_copy_size,
                                                            WARP_INPUTS, POLICY_INPUTS)
@@ -508,8 +510,19 @@ def main(demo=False):
       # big と small の実力差が大きく、restart_on_crash (倍々 backoff で回数では諦めない =
       # ManagerProcess.reap_if_crashed) で big の再ロードを粘る方が良い (user 判断)。
       # 再ロード中は bigModelLoading / bigModelFailed が engage を止める。
+      # ⚠⚠ ただし **粘る時間には上限を置く**。09-17 に「load 失敗 → crash → 再起動」が 30-150 秒おきに
+      # 45 分続き、openpilot が一度も使えなかった (#1964 の flock 自家中毒。復旧は c4 の再起動 =
+      # ロックはプロセスと一緒に消える)。⇒ 5 分粘っても載らなければ **c4 が自分で再起動して
+      # big を取り直す**。⚠ small へは降格しない (user 09-17「small はいらない」) — chestnut_selfheal 参照。
+      # ⚠ 粘る時間は原因で変える。**自分で flock を握ったまま弾かれている (#1964)** なら
+      #   modeld の再起動も USB reset も効かないと分かっているので長く粘る意味がない
+      #   (60s/2 回)。読めなければ GPU ハングの可能性を残して長い方 (300s/3 回) で見る。
+      if note_load_failure(self_locked=is_self_locked(_egpu_lock_holder())):
+        request_reboot()
       raise RuntimeError(f"eGPU model load failed or timed out ({why})")
     params.remove("ChestnutModelError")
+    # ⚠ 連続失敗の記録と **自動再起動の累計** をここで捨てる (chestnut_selfheal 参照)。
+    note_load_success()
   else:
     model = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=False)
 
