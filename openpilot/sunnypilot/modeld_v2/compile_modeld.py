@@ -79,8 +79,15 @@ def get_policy_npy_shapes(input_shapes: dict, is_supercombo: bool = False) -> tu
   return shapes, sizes
 
 
-def generate_queues_and_npy(input_shapes: dict, frame_skip: int, device: str = Device.DEFAULT,
+def generate_queues_and_npy(input_shapes: dict, frame_skip: int, device: str | None = None,
                             is_supercombo: bool = False) -> tuple[dict, dict]:
+  # ⚠⚠ device の既定は **None**。`Device.DEFAULT` を既定引数に書くと import 時に 1 度だけ評価され、
+  #    modeld を起動した瞬間に tinygrad が AMD backend を open しに行く (upstream #1964 の真因。
+  #    sunnypilot #2033 / tinygrad #18205 で修正中)。cold boot では PCIe のリンクトレーニングと競合して
+  #    失敗し、**flock と USB claim を掴んだまま解放しない** ⇒ 数秒後の本番 load が自分自身の fd で
+  #    ブロックされ、`_load_with_retry` のリトライでは原理的に救えない (09-17 に実車で 45 分ハマった)。
+  #    ⇒ **実際に使う直前まで Device.DEFAULT に触らない**。
+  device = device or Device.DEFAULT
   road_key, _ = _detect_vision_keys(input_shapes)
   if not road_key:
     raise ValueError("Vision road key missing from input shapes.")
@@ -129,12 +136,12 @@ def generate_queues_and_npy(input_shapes: dict, frame_skip: int, device: str = D
 
 
 def make_split_input_queues(vision_input_shapes: dict, policy_input_shapes: dict,
-                            frame_skip: int, device: str = Device.DEFAULT) -> tuple[dict, dict]:
+                            frame_skip: int, device: str | None = None) -> tuple[dict, dict]:
   return generate_queues_and_npy({**vision_input_shapes, **policy_input_shapes}, frame_skip, device, is_supercombo=False)
 
 
 def make_supercombo_input_queues(input_shapes: dict, frame_skip: int,
-                                 device: str = Device.DEFAULT) -> tuple[dict, dict]:
+                                 device: str | None = None) -> tuple[dict, dict]:
   return generate_queues_and_npy(input_shapes, frame_skip, device, is_supercombo=True)
 
 
@@ -142,7 +149,7 @@ def make_random_images(keys, shape, device, rng=None):
   return {k: Tensor.randint(shape, low=0, high=256, dtype=dtypes.uint8, device=device).realize() for k in keys}
 
 
-def make_warp_queues(device=Device.DEFAULT):
+def make_warp_queues(device=None):
   npy = {
     'tfm': np.zeros((3, 3), dtype=np.float32),
     'big_tfm': np.zeros((3, 3), dtype=np.float32),
