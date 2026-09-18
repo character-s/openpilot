@@ -403,9 +403,13 @@ def test_chestnut_model_catalog_url_survives():
   **chestnut スロットが空のまま残って stock supercombo まで落ちる**
   (`get_active_bundle()` に cross-slot fallback が無い。09-06 に実車で踏んだ)。
   ⚠ 上流が v26 以降を出したら**上げる**のは歓迎。**下げてはいけない**。
+  ⇒ **版を固定で照合しない** (09-19 に v26 へ上げてこのテストが落ちた)。見るのは下限だけ。
+  09-19 時点 = **v26** (上流はまだ v25。CTMv3 = `CTV3M` を降ろすために GS 側で先行している)。
   """
-  assert 'driving_models_chestnut_v25.json' in _read(FETCHER_PY), \
-    'chestnut のカタログが v25 でない = 追従で古い catalog に戻った疑い (CTM が選べなくなる)'
+  m = re.search(r'driving_models_chestnut_v(\d+)\.json', _read(FETCHER_PY))
+  assert m, 'chestnut のカタログ URL が消えている (CTM が選べなくなる)'
+  assert int(m.group(1)) >= 25, \
+    f'chestnut のカタログが v{m.group(1)} = 追従で古い catalog に戻った疑い (CTM が選べなくなる)'
 
 
 def test_scc_map_gating_survives():
