@@ -49,6 +49,7 @@ from openpilot.selfdrive.modeld.modeld import ChestnutState
 
 from openpilot.selfdrive.modeld.compile_modeld import (
   MODELD_INPUTS,
+  NV12Frame,
   make_input_queues as make_stock_input_queues,
   make_warp,
 )
@@ -273,7 +274,7 @@ class ModelState(ModelStateBase):
     self.frame_buffers: dict = {}
 
     if self.is_stateful:
-      self._init_stateful(jits, metadata, nv12_info)
+      self._init_stateful(jits, metadata, nv12_info, cam_w, cam_h)
     elif self.is_run_model or 'model' in metadata:
       model_metadata = metadata.get('model', metadata)
       self.input_shapes = model_metadata['input_shapes']
@@ -327,7 +328,7 @@ class ModelState(ModelStateBase):
       self.full_frames = {k: Tensor(np.zeros(nv12_info[3], dtype=np.uint8), device=self.WARP_DEV).contiguous().realize() for k in self._vision_input_names}
       self.warp(**{k: self.input_queues[k] for k in WARP_INPUTS}, frame=self.full_frames[self._road_key], big_frame=self.full_frames[self._wide_key])
 
-  def _init_stateful(self, jits: dict, metadata: dict, nv12_info) -> None:
+  def _init_stateful(self, jits: dict, metadata: dict, nv12_info, cam_w: int, cam_h: int) -> None:
     """recompiled27 以降 (CTMv3) の契約を組む。
 
     旧形式との違いは 3 つだけ:
@@ -384,7 +385,11 @@ class ModelState(ModelStateBase):
     # warp は pkl に含まれないので自前で JIT する。出力は (2, 6, H, W) = [road, wide] で
     # new_img と同じ形 (run_policy が warped[0:1]=img / warped[1:2]=big_img と使っているのが根拠)。
     img_shape = specs['new_img'][0]
-    self.warp = TinyJit(make_warp(nv12_info, img_shape[3], img_shape[2]), prune=True)
+    # ⚠⚠ make_warp が取るのは **NV12Frame (cam_w/cam_h 込みの 6 要素)**。get_nv12_info() の戻り
+    #   (4 要素) をそのまま渡すと frame_prepare の unpack が
+    #   ValueError('not enough values to unpack (expected 6, got 4)') で落ちる (09-20 に実車で踏んだ)。
+    nv12 = NV12Frame(cam_w, cam_h, *nv12_info)
+    self.warp = TinyJit(make_warp(nv12, img_shape[3], img_shape[2]), prune=True)
     # VisionIpc 側は従来どおり road/wide の 2 本。warp が両者を 1 つのバッチに束ねる。
     self._vision_input_names = ['img', 'big_img']
 
