@@ -14,6 +14,7 @@ import base64
 import math
 import numpy as np
 import pickle
+import re
 import threading
 import time
 from setproctitle import setproctitle
@@ -210,6 +211,26 @@ class FrameMeta:
       self.frame_id, self.timestamp_sof, self.timestamp_eof = vipc.frame_id, vipc.timestamp_sof, vipc.timestamp_eof
 
 
+# GS: `models/recompiledNN/` のこの世代以降は **comma 本家の tinygrad で焼かれている**。
+# pkl は Ops を値で持つので、読むときに本家の序数として解釈し直さないと JIT の入力照合が
+# `args mismatch in JIT` で落ちる (09-20 に CTMv3 で踏んだ)。⇒ helpers の upstream_ops。
+UPSTREAM_TINYGRAD_RECOMPILE = 26
+_RECOMPILE_RE = re.compile(r"/models/recompiled(\d+)/")
+
+
+def _built_with_upstream_tinygrad(bundle) -> bool:
+  if bundle is None:
+    return False
+  try:
+    for model in bundle.models:
+      found = _RECOMPILE_RE.search(model.artifact.downloadUri.uri or "")
+      if found and int(found.group(1)) >= UPSTREAM_TINYGRAD_RECOMPILE:
+        return True
+  except Exception:
+    cloudlog.exception("could not tell which tinygrad built this bundle")
+  return False
+
+
 def input_view(buffer: Buffer, shape: tuple[int, ...], dtype: DType, offset: int) -> Tensor:
   """既存バッファの上に Tensor を被せる (本家 comma の modeld と同じ)。
 
@@ -246,8 +267,9 @@ class ModelState(ModelStateBase):
     self._init_combined(pkl_path, cam_w, cam_h, model_bundle)
 
   def _init_combined(self, pkl_path, cam_w, cam_h, bundle):
-    cloudlog.warning(f"loading combined pkl: {pkl_path}")
-    jits = load_oob(open_file_chunked(pkl_path))
+    upstream_ops = _built_with_upstream_tinygrad(bundle)
+    cloudlog.warning(f"loading combined pkl: {pkl_path} (upstream_ops={upstream_ops})")
+    jits = load_oob(open_file_chunked(pkl_path), upstream_ops=upstream_ops)
 
     metadata = jits['metadata']
     self.WARP_DEV = metadata.get('warp_dev', 'QCOM') if COMMA_HARDWARE else 'CPU'

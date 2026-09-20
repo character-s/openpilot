@@ -61,6 +61,8 @@ CAR_EVENTS_PY = 'openpilot/selfdrive/car/car_events.py'
 LONG_PLANNER_PY = 'openpilot/selfdrive/controls/lib/longitudinal_planner.py'
 SELFDRIVED_PY = 'openpilot/selfdrive/selfdrived/selfdrived.py'
 MODELD_HELPERS_PY = 'openpilot/selfdrive/modeld/helpers.py'
+# ⚠ 上は stock 側。sunnypilot の modeld_v2 にも同名ファイルがあるので別名で持つ
+MODELD_V2_HELPERS_PY = 'openpilot/sunnypilot/modeld_v2/helpers.py'
 PROCESS_PY = 'openpilot/system/manager/process.py'
 PROCESS_CONFIG_PY = 'openpilot/system/manager/process_config.py'
 OSM_MAP_DATA_PY = 'openpilot/sunnypilot/mapd/live_map_data/osm_map_data.py'
@@ -458,6 +460,32 @@ def test_modeld_runs_stateful_contract():
   assert 'make_warp' in src and 'TinyJit(make_warp(' in src, 'warp の自前 JIT が消えている'
   # ⚠ QCOM のままだと new_img の device と食い違って落ちる
   assert re.search(r'self\.WARP_DEV = self\.model_device', src), 'warp を model と同じ device で回す指定が消えている'
+
+
+def test_upstream_ops_remap_survives():
+  """comma 本家の tinygrad で焼かれた pkl の Ops を読み替える対応 (09-20)。
+
+  ⚠ Ops は pkl に **値 (序数)** で焼かれる。こちらの tinygrad には本家に無い Ops が
+  2 個あるので、本家製の pkl (recompiled26 以降 = CTMv3) をそのまま読むと値がズレ、
+  JIT の入力照合が `args mismatch in JIT` で必ず落ちる (実車で踏んだ)。
+  ⚠⚠ **`_OPS_ONLY_LOCAL` を勝手に増やすな** — 本家の enum と突き合わせてからでないと
+  全モデルの復元が壊れる。tinygrad を追従したら必ずここを見直すこと。
+  """
+  src = _read(MODELD_V2_HELPERS_PY)
+  found = re.search(r"_OPS_ONLY_LOCAL = \(([^)]*)\)", src)
+  assert found, 'Ops の読み替え表が消えている (CTMv3 がまた JitError で落ちる)'
+  names = re.findall(r"'([A-Z_]+)'|\"([A-Z_]+)\"", found.group(1))
+  names = [a or b for a, b in names]
+  assert names == ['RETURNED', 'CONTIGUOUS'], f'読み替え表が変わっている: {names}'
+  assert '_upstream_enum_member' in src, '読み替え関数が消えている'
+  assert 'upstream_ops: bool = False' in src, 'load_oob の引数が消えている'
+  # 既定は無変換であること (旧モデルの復元を壊さない)
+  assert re.search(r'def load_oob\(f, upstream_ops: bool = False\)', src), \
+    'load_oob の既定が無変換でなくなっている'
+
+  md = _read(MODELD_PY)
+  assert 'UPSTREAM_TINYGRAD_RECOMPILE = 26' in md, '本家 tinygrad 製と判定する世代が消えている'
+  assert 'upstream_ops=upstream_ops' in md, 'modeld が読み替えを渡していない'
 
 
 def test_modeld_rejects_unknown_pkl_layout():
