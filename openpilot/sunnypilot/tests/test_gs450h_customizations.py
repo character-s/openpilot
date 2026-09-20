@@ -477,7 +477,9 @@ def test_headroom_stage9_kp_table_survives():
 def test_nnlc_settled_trim_survives():
   """NNLC の落ち着き判定 + FF trim。"""
   assert _literal(NNLC_PY, 'SETTLED_LA_MIN') == 0.5
-  assert _literal(NNLC_PY, 'SETTLED_RAMP_X') == [1.0, 2.5]
+  # 09-20: [1.0, 2.5] -> [0.3, 1.0] へ短縮。旧値ではテーブルが滞在時間の 98% に届いていなかった
+  # (ramp=1 の滞在率 0-6% / 実効 trim の中央値がほぼ 0.0%)。根拠 = _lat_postdrive.py の §8c。
+  assert _literal(NNLC_PY, 'SETTLED_RAMP_X') == [0.3, 1.0]
   assert _literal(NNLC_PY, 'SETTLED_RAMP_Y') == [0.0, 1.0]
   trim_la = _literal(NNLC_PY, 'SETTLED_TRIM_LA')
   trim_v = _literal(NNLC_PY, 'SETTLED_TRIM_V')
