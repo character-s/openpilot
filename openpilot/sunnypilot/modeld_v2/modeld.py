@@ -10,19 +10,11 @@ from collections.abc import Callable
 import os
 import traceback
 os.environ['GMMU'] = '0'
-import base64
-import math
 import numpy as np
-import pickle
-import re
 import threading
 import time
 from setproctitle import setproctitle
-from tinygrad.device import Buffer
-from tinygrad.dtype import DType
-from tinygrad.engine.jit import TinyJit
 from tinygrad.tensor import Tensor
-from tinygrad.uop.ops import UOp
 
 import openpilot.cereal.messaging as messaging
 from openpilot.common.hardware import COMMA_HARDWARE
@@ -50,9 +42,7 @@ from openpilot.selfdrive.modeld.modeld import ChestnutState
 
 from openpilot.selfdrive.modeld.compile_modeld import (
   MODELD_INPUTS,
-  NV12Frame,
   make_input_queues as make_stock_input_queues,
-  make_warp,
 )
 from openpilot.sunnypilot.modeld_v2.fill_model_msg import fill_model_msg, fill_pose_msg, PublishState, get_curvature_from_output
 from openpilot.sunnypilot.modeld_v2.parse_model_outputs import Parser
@@ -211,36 +201,6 @@ class FrameMeta:
       self.frame_id, self.timestamp_sof, self.timestamp_eof = vipc.frame_id, vipc.timestamp_sof, vipc.timestamp_eof
 
 
-# GS: `models/recompiledNN/` のこの世代以降は **comma 本家の tinygrad で焼かれている**。
-# pkl は Ops を値で持つので、読むときに本家の序数として解釈し直さないと JIT の入力照合が
-# `args mismatch in JIT` で落ちる (09-20 に CTMv3 で踏んだ)。⇒ helpers の upstream_ops。
-UPSTREAM_TINYGRAD_RECOMPILE = 26
-_RECOMPILE_RE = re.compile(r"/models/recompiled(\d+)/")
-
-
-def _built_with_upstream_tinygrad(bundle) -> bool:
-  if bundle is None:
-    return False
-  try:
-    for model in bundle.models:
-      found = _RECOMPILE_RE.search(model.artifact.downloadUri.uri or "")
-      if found and int(found.group(1)) >= UPSTREAM_TINYGRAD_RECOMPILE:
-        return True
-  except Exception:
-    cloudlog.exception("could not tell which tinygrad built this bundle")
-  return False
-
-
-def input_view(buffer: Buffer, shape: tuple[int, ...], dtype: DType, offset: int) -> Tensor:
-  """既存バッファの上に Tensor を被せる (本家 comma の modeld と同じ)。
-
-  ⚠ CTMv3 では **出力先を state 入力と同じバッファに向ける**のに使う。こうすると
-  `next_state_*` が書かれた時点で次フレームの `state_*` が更新済みになり、コピーが要らない。
-  """
-  view = buffer.view(math.prod(shape), dtype, offset).ensure_allocated()
-  return Tensor(UOp.from_buffer(view)).reshape(shape)
-
-
 class ModelState(ModelStateBase):
   inputs: dict[str, np.ndarray]
   prev_desire: np.ndarray
@@ -267,24 +227,19 @@ class ModelState(ModelStateBase):
     self._init_combined(pkl_path, cam_w, cam_h, model_bundle)
 
   def _init_combined(self, pkl_path, cam_w, cam_h, bundle):
-    upstream_ops = _built_with_upstream_tinygrad(bundle)
-    cloudlog.warning(f"loading combined pkl: {pkl_path} (upstream_ops={upstream_ops})")
-    jits = load_oob(open_file_chunked(pkl_path), upstream_ops=upstream_ops)
+    cloudlog.warning(f"loading combined pkl: {pkl_path}")
+    jits = load_oob(open_file_chunked(pkl_path))
 
     metadata = jits['metadata']
     self.WARP_DEV = metadata.get('warp_dev', 'QCOM') if COMMA_HARDWARE else 'CPU'
     self.DEV = ('AMD' if self.chestnut else 'QCOM') if COMMA_HARDWARE else 'CPU'
     self.QUEUE_DEV = self.DEV
     self.is_run_model = 'run_model' in jits
-    # GS: recompiled27 (CTMv3) 以降の契約。履歴を modeld 側のリングバッファではなく
-    # state_* 入力 / next_state_* 出力で持ち回る。shape/dtype/device は input_specs に入っている。
-    self.is_stateful = 'run' in jits and 'input_specs' in jits
 
     # GS: 読めない pkl を掴んだとき、素の KeyError('run_policy') で死ぬと原因が
     # 「eGPU のロック競合」に見える (09-20 に CTMv3 で実際にそう誤診した)。
-    # recompiled27 以降は jits['run'] + 外部 state queue (state_img_q / next_state_*) の
-    # 別契約で、このランタイムでは実行できない。⇒ 何が違うのかを言ってから落ちる。
-    if not self.is_run_model and not self.is_stateful and 'run_policy' not in jits:
+    # ⇒ 何が違うのかを言ってから落ちる。
+    if not self.is_run_model and 'run_policy' not in jits:
       found = f"jits={sorted(repr(k) for k in jits)} metadata={sorted(repr(k) for k in metadata)}"
       raise RuntimeError(f"unsupported pkl layout ({found}): this build runs 'run_model'/'run_policy' only, "
                          + f"the model targets a newer runtime contract - pick another bundle. pkl={pkl_path}")
@@ -295,9 +250,7 @@ class ModelState(ModelStateBase):
     self._blob_cache: dict = {}
     self.frame_buffers: dict = {}
 
-    if self.is_stateful:
-      self._init_stateful(jits, metadata, nv12_info, cam_w, cam_h)
-    elif self.is_run_model or 'model' in metadata:
+    if self.is_run_model or 'model' in metadata:
       model_metadata = metadata.get('model', metadata)
       self.input_shapes = model_metadata['input_shapes']
       self.vision_output_slices = model_metadata['output_slices']
@@ -350,90 +303,6 @@ class ModelState(ModelStateBase):
       self.full_frames = {k: Tensor(np.zeros(nv12_info[3], dtype=np.uint8), device=self.WARP_DEV).contiguous().realize() for k in self._vision_input_names}
       self.warp(**{k: self.input_queues[k] for k in WARP_INPUTS}, frame=self.full_frames[self._road_key], big_frame=self.full_frames[self._wide_key])
 
-  def _init_stateful(self, jits: dict, metadata: dict, nv12_info, cam_w: int, cam_h: int) -> None:
-    """recompiled27 以降 (CTMv3) の契約を組む。
-
-    旧形式との違いは 3 つだけ:
-      ① `jits['run']` は解像度キーを持たない 1 本で、**warp を含まない**
-         (`run_model` 形式は warp 統合済みだったので `[(cam_w, cam_h)]` キーがあった)
-      ② 履歴を modeld 側のリングバッファではなく **`state_*` 入力 / `next_state_*` 出力**で持ち回る
-      ③ metadata がネストし、`output_slices` は base64 された pickle
-    ⚠ shape/dtype/device は **`jits['input_specs']` に入っている**ので推測しない
-      (本家 comma の modeld と同じ読み方。出力の slice は CTMV2 と完全に同じ並びなので parser は共通)。
-    """
-    specs, out_specs = jits['input_specs'], jits['output_specs']
-    self.run_stateful = jits['run']
-    self.run_model = self.run_policy = None
-    self.model_device = specs['new_img'][2]
-    # ⚠ CTMv3 の metadata に warp_dev は無い。new_img はモデルと同じ device を要求するので
-    #   warp もそこで回す (既定の QCOM のままだと device 不一致で落ちる)。
-    self.WARP_DEV = self.model_device if COMMA_HARDWARE else 'CPU'
-
-    inner = metadata.get('metadata') or {}
-    slices = inner.get('output_slices')
-    self.vision_output_slices = pickle.loads(base64.b64decode(slices)) if isinstance(slices, str | bytes) else slices
-    self.policy_output_slices = {}
-    self._policy_slices_list = []
-    self._combined_model_type = 'supercombo'
-    self.input_shapes = {name: shape for name, (shape, _, _) in specs.items()}
-    self.frame_skip = 1
-
-    # `next_<name>` が出力にあるものが state。⚠ 中身を解釈する必要は無い —
-    # モデルが返した値をそのまま次フレームへ戻すだけで、初期値はゼロでよい。
-    self.state_pairs = {n: f'next_{n}' for n in specs if f'next_{n}' in out_specs}
-    self._output_names = list(out_specs)
-
-    self.input_queues = {name: Tensor(np.zeros(shape, dtype=np.dtype(dtype)), device=device).contiguous().realize()
-                         for name, (shape, dtype, device) in specs.items() if name != 'new_img'}
-
-    # ⚠⚠ この JIT は **戻り値を返さない** (`captured.ret` は None)。出力は「渡したバッファ」に書かれる。
-    #   tinygrad は kwargs に dict を渡すと **その中の Tensor も入力バッファとして拾う**
-    #   (_prepare_jit_inputs の「extract tensors from containers」) ので、本家と同じく
-    #   `output_buffers=<dict>` の名前で渡す。⚠ dict 自体は Tensor ではないので引数名には数えられず、
-    #   expected_names=7 / expected_input_info=11 (入力 7 + 出力 4) になる = 実物と一致。
-    # ⚠ **挿入順が入力バッファの順序を決める**ので output_specs の順を崩さないこと。
-    self.outputs = {name: Tensor(np.zeros(shape, dtype=np.dtype(dtype)), device=device).contiguous().realize()
-                    for name, (shape, dtype, device) in out_specs.items()}
-    # state は「出力先を入力バッファそのものに向ける」= 書かれた瞬間に次フレームの入力になる
-    for name, next_name in self.state_pairs.items():
-      state = self.input_queues[name]
-      self.outputs[next_name] = input_view(state._buffer(), state.shape, state.dtype, 0)
-    self.numpy_inputs = {name: np.zeros(specs[name][0], dtype=np.dtype(specs[name][1]))
-                         for name in ('desire', 'traffic_convention', 'action_t') if name in specs}
-    for key in WARP_INPUTS:
-      self.numpy_inputs[key] = np.zeros((3, 3), dtype=np.float32)
-      self.input_queues[key] = Tensor(self.numpy_inputs[key], device='NPY').realize()
-
-    # warp は pkl に含まれないので自前で JIT する。出力は (2, 6, H, W) = [road, wide] で
-    # new_img と同じ形 (run_policy が warped[0:1]=img / warped[1:2]=big_img と使っているのが根拠)。
-    img_shape = specs['new_img'][0]
-    # ⚠⚠ make_warp が取るのは **NV12Frame (cam_w/cam_h 込みの 6 要素)**。get_nv12_info() の戻り
-    #   (4 要素) をそのまま渡すと frame_prepare の unpack が
-    #   ValueError('not enough values to unpack (expected 6, got 4)') で落ちる (09-20 に実車で踏んだ)。
-    nv12 = NV12Frame(cam_w, cam_h, *nv12_info)
-    # ⚠⚠ make_warp に渡すのは **元画像サイズ**であって new_img の H/W ではない。
-    #   frames_to_tensor が最後に (6, model_h//2, model_w//2) へ畳む (Y を 2x2 で 4 枚 + U + V)
-    #   ので、new_img が (…, 6, 128, 256) なら **512x256** を渡す。等倍で渡すと (6, 64, 128) に
-    #   なり JIT の入力照合が落ちる (09-20 に実車で踏んだ)。
-    model_w, model_h = img_shape[3] * 2, img_shape[2] * 2
-    self.warp = TinyJit(make_warp(nv12, model_w, model_h), prune=True)
-    # VisionIpc 側は従来どおり road/wide の 2 本。warp が両者を 1 つのバッチに束ねる。
-    self._vision_input_names = ['img', 'big_img']
-
-  def _run_stateful(self) -> Tensor:
-    for name, arr in self.numpy_inputs.items():
-      if name in WARP_INPUTS or name not in self.input_queues:
-        continue
-      self.input_queues[name].assign(Tensor(arr, device='NPY').to(self.model_device)).realize()
-
-    warped = self.warp(**{k: self.input_queues[k] for k in WARP_INPUTS},
-                       frame=self.full_frames[self._road_key], big_frame=self.full_frames[self._wide_key])
-    # ⚠ 戻り値は使わない (None が返る)。出力は self.outputs のバッファに書かれ、
-    #   state は入力バッファと同じ実体を指しているので、この呼び出しだけで次フレームの準備が終わる。
-    self.run_stateful(output_buffers=self.outputs, new_img=warped,
-                      **{k: v for k, v in self.input_queues.items() if k not in WARP_INPUTS})
-    return self.outputs['outputs']
-
   def warmup(self) -> None:
     dummy_size = self.frame_copy_size if self.is_run_model else self.frame_buf_params[self._road_key][3]
     dummy_frames = {k: np.zeros(dummy_size, dtype=np.uint8) for k in self._vision_input_names}
@@ -448,11 +317,6 @@ class ModelState(ModelStateBase):
     else:
       for v in self.numpy_inputs.values():
         v[:] = 0
-      if self.is_stateful:
-        # ⚠ warmup の dummy で汚れた履歴を持ち越さない。⚠⚠ 出力バッファが同じ実体を指しているので
-        #   バッファを置き換えずに中身だけ 0 にすること (本家 comma も assign(0))。
-        for name in self.state_pairs:
-          self.input_queues[name].assign(0).realize()
       self.full_frames.clear()
       self._blob_cache.clear()
     self.prev_desire[:] = 0
@@ -499,8 +363,6 @@ class ModelState(ModelStateBase):
     if self.run_model is not None:
       outs, = self.run_model(**{k: self.input_queues[k] for k in MODELD_INPUTS})
       raw_outputs = outs
-    elif self.is_stateful:
-      raw_outputs = self._run_stateful()
     else:
       assert self.warp is not None and self.run_policy is not None
       warped = self.warp(**{k: self.input_queues[k] for k in WARP_INPUTS}, frame=self.full_frames[self._road_key], big_frame=self.full_frames[self._wide_key])

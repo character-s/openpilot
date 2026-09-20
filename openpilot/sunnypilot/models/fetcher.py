@@ -94,19 +94,18 @@ class ModelParser:
 
     return model_bundle
 
-  # GS: highest `models/recompiledNN/` generation this build's modeld_v2 can actually execute.
-  # recompiled27 (Cinque Terre V3) switched to a different runtime contract - jits['run'] instead of
-  # jits['run_model'], and externally carried state queues (state_img_q / next_state_feat_q / ...)
-  # instead of features_buffer. modeld_v2 learned that contract on 09-20 (see _init_stateful), so 27
-  # is supported again; anything newer is refused up front because loading an unknown layout makes
-  # modeld crash-loop forever, which looks exactly like an eGPU lock problem (09-20: misdiagnosed as
-  # exactly that). Raise this only together with the matching runtime support.
-  MAX_SUPPORTED_RECOMPILE = 27
+  # GS: highest `models/recompiledNN/` generation this build can actually execute.
+  # recompiled27 (Cinque Terre V3) is built against comma's tinygrad, which has 2 fewer Ops than
+  # sunnypilot's. Ops are pickled by *value*, so the whole UOp graph decodes into the wrong ops and
+  # the model cannot run here - upstream sunnypilot stays on catalog v25 for the same reason.
+  # Picking one only produces a crash loop with no useful error, so drop it before it can be chosen.
+  # Raise this once sunnypilot's tinygrad and the model builds line up again.
+  MAX_SUPPORTED_RECOMPILE = 25
   _RECOMPILE_RE = re.compile(r"/models/recompiled(\d+)/")
 
   @staticmethod
   def _runtime_contract_supported(bundle_dict: dict) -> bool:
-    """False for models compiled for a runtime this build cannot execute."""
+    """False for models built against a tinygrad this build cannot execute."""
     for model in bundle_dict.get("models", []):
       uri = model.get("artifact", {}).get("downloadUri", {}).get("uri", "") or ""
       found = ModelParser._RECOMPILE_RE.search(uri)
@@ -124,7 +123,7 @@ class ModelParser:
         continue
       if not ModelParser._runtime_contract_supported(bundle_dict):
         name = bundle_dict.get('internalName')
-        cloudlog.warning(f"models: dropping {name} from the catalog - compiled for a newer runtime contract than this build can run")
+        cloudlog.warning(f"models: dropping {name} from the catalog - built against a tinygrad this build cannot run")
         continue
       kept.append(bundle)
     return kept
@@ -170,9 +169,10 @@ class ModelCache:
 class ModelFetcher:
   """Handles fetching and caching of model data from remote source"""
   MODEL_URL = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_v22.json"
-  # GS: upstream is still on v25; bumped here to pick up Cinque Terre V3 (idx=13).
-  # When following upstream, compare this against their version instead of keeping ours blindly.
-  MODEL_URL_CHESTNUT = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_chestnut_v26.json"
+  # GS: back on v25, same as upstream. v26 only adds Cinque Terre V3, which is built against
+  # comma's tinygrad (2 fewer Ops) and cannot run here - upstream stays on v25 for that reason too.
+  # Bump this again only when sunnypilot's tinygrad and the model builds line up.
+  MODEL_URL_CHESTNUT = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_chestnut_v25.json"
 
   MODEL_SOURCES = {
     "qcom": (MODEL_URL, ""),
