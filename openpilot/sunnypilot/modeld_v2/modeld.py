@@ -411,7 +411,12 @@ class ModelState(ModelStateBase):
     #   (4 要素) をそのまま渡すと frame_prepare の unpack が
     #   ValueError('not enough values to unpack (expected 6, got 4)') で落ちる (09-20 に実車で踏んだ)。
     nv12 = NV12Frame(cam_w, cam_h, *nv12_info)
-    self.warp = TinyJit(make_warp(nv12, img_shape[3], img_shape[2]), prune=True)
+    # ⚠⚠ make_warp に渡すのは **元画像サイズ**であって new_img の H/W ではない。
+    #   frames_to_tensor が最後に (6, model_h//2, model_w//2) へ畳む (Y を 2x2 で 4 枚 + U + V)
+    #   ので、new_img が (…, 6, 128, 256) なら **512x256** を渡す。等倍で渡すと (6, 64, 128) に
+    #   なり JIT の入力照合が落ちる (09-20 に実車で踏んだ)。
+    model_w, model_h = img_shape[3] * 2, img_shape[2] * 2
+    self.warp = TinyJit(make_warp(nv12, model_w, model_h), prune=True)
     # VisionIpc 側は従来どおり road/wide の 2 本。warp が両者を 1 つのバッチに束ねる。
     self._vision_input_names = ['img', 'big_img']
 
