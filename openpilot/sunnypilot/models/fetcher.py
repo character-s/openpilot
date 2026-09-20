@@ -5,6 +5,7 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 
+import re
 import time
 import os
 import requests
@@ -93,10 +94,40 @@ class ModelParser:
 
     return model_bundle
 
+  # GS: highest `models/recompiledNN/` generation this build's modeld_v2 can actually execute.
+  # recompiled27 (Cinque Terre V3) switched to a different runtime contract - jits['run'] instead of
+  # jits['run_model'], and externally carried state queues (state_img_q / next_state_feat_q / ...)
+  # instead of features_buffer. modeld_v2 learned that contract on 09-20 (see _init_stateful), so 27
+  # is supported again; anything newer is refused up front because loading an unknown layout makes
+  # modeld crash-loop forever, which looks exactly like an eGPU lock problem (09-20: misdiagnosed as
+  # exactly that). Raise this only together with the matching runtime support.
+  MAX_SUPPORTED_RECOMPILE = 27
+  _RECOMPILE_RE = re.compile(r"/models/recompiled(\d+)/")
+
+  @staticmethod
+  def _runtime_contract_supported(bundle_dict: dict) -> bool:
+    """False for models compiled for a runtime this build cannot execute."""
+    for model in bundle_dict.get("models", []):
+      uri = model.get("artifact", {}).get("downloadUri", {}).get("uri", "") or ""
+      found = ModelParser._RECOMPILE_RE.search(uri)
+      if found and int(found.group(1)) > ModelParser.MAX_SUPPORTED_RECOMPILE:
+        return False
+    return True
+
   @staticmethod
   def parse_models(json_data: dict) -> list[custom.ModelManagerSP.ModelBundle]:
     found_bundles = [ModelParser._parse_bundle(bundle) for bundle in json_data.get("bundles", [])]
-    return [bundle for bundle in found_bundles if is_bundle_version_compatible(bundle.to_dict())]
+    kept = []
+    for bundle in found_bundles:
+      bundle_dict = bundle.to_dict()
+      if not is_bundle_version_compatible(bundle_dict):
+        continue
+      if not ModelParser._runtime_contract_supported(bundle_dict):
+        name = bundle_dict.get('internalName')
+        cloudlog.warning(f"models: dropping {name} from the catalog - compiled for a newer runtime contract than this build can run")
+        continue
+      kept.append(bundle)
+    return kept
 
 
 class ModelCache:

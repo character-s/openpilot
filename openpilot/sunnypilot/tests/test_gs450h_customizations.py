@@ -412,6 +412,67 @@ def test_chestnut_model_catalog_url_survives():
     f'chestnut のカタログが v{m.group(1)} = 追従で古い catalog に戻った疑い (CTM が選べなくなる)'
 
 
+def test_unsupported_runtime_contract_is_filtered_out():
+  """recompiled26 以降の bundle は catalog から落ちること (09-20 の CTMv3 事故)。
+
+  CTMv3 (`CTV3M`, recompiled27) は `jits['run']` + 外部 state queue (`state_img_q` /
+  `next_state_feat_q`) の**別契約**。09-20 に `_init_stateful` で対応したので 27 は通すが、
+  **未知の契約 (28 以降) は手前で弾く**。
+  掴むと `KeyError('run_policy')` で crash ループし、**症状が eGPU のロック競合と
+  見分けがつかない** (09-20 に実車で踏んだ)。⇒ 選べないよう catalog 段階で落とす。
+  ⚠ 上流が新契約に対応したら **MAX_SUPPORTED_RECOMPILE を上げる / フィルタを外す**。
+  ⚠ 下げると CTM/CTMV2 (recompiled25) まで消えて選択肢が無くなる。
+  """
+  src = _read(FETCHER_PY)
+  m = re.search(r'MAX_SUPPORTED_RECOMPILE\s*=\s*(\d+)', src)
+  assert m, 'recompiled 世代の上限が消えている (CTMv3 系をまた掴んで crash ループする)'
+  max_gen = int(m.group(1))
+  assert max_gen >= 27, f'recompiled{max_gen} 止まり = CTMv3 (recompiled27) が catalog から消える'
+
+  assert '_runtime_contract_supported' in src, 'catalog フィルタの定義が消えている'
+  assert re.search(r'if not ModelParser\._runtime_contract_supported\(', src),     'parse_models がフィルタを呼んでいない = 定義だけ残って効いていない'
+
+  pattern = re.search(r'_RECOMPILE_RE\s*=\s*re\.compile\(r"([^"]+)"\)', src)
+  assert pattern, '_RECOMPILE_RE が消えている'
+  rx = re.compile(pattern.group(1))
+  base = 'https://huggingface.co/datasets/sunnypilot/sunnypilot_models_v1/resolve/main/models/'
+  for gen, supported in ((23, True), (24, True), (25, True), (26, True), (27, True), (28, False)):
+    found = rx.search(f'{base}recompiled{gen}/model-X-1/driving_x_tinygrad.pkl')
+    assert found, f'recompiled{gen} の URL にマッチしない = フィルタが素通りする'
+    assert (int(found.group(1)) <= max_gen) is supported, f'recompiled{gen} の採否が逆'
+
+
+def test_modeld_runs_stateful_contract():
+  """CTMv3 (recompiled27) の契約を読む経路が生きていること (09-20 実装)。
+
+  ⚠ 追従で落ちると **CTMv3 を選んだ瞬間に modeld が crash ループする** (実車で engage できない)。
+  shape/dtype/device は `jits['input_specs']` から取る = **推測しない**のが要点。
+  state は `next_<name>` を次フレームの `<name>` に戻すだけで、中身を解釈しない。
+  """
+  src = _read(MODELD_PY)
+  assert "self.is_stateful = 'run' in jits and 'input_specs' in jits" in src,     'stateful 契約の判定が消えている'
+  assert '_init_stateful' in src and '_run_stateful' in src, 'stateful の初期化/実行が消えている'
+  assert re.search(r"state_pairs = \{n: f'next_\{n\}' for n in specs if f'next_\{n\}' in out_specs\}", src),     'state ペアの導出が消えている'
+  assert 'base64.b64decode(slices)' in src, 'output_slices の base64 デコードが消えている'
+  # warp は pkl に含まれないので自前で JIT する
+  assert 'make_warp' in src and 'TinyJit(make_warp(' in src, 'warp の自前 JIT が消えている'
+  # ⚠ QCOM のままだと new_img の device と食い違って落ちる
+  assert re.search(r'self\.WARP_DEV = self\.model_device', src), 'warp を model と同じ device で回す指定が消えている'
+
+
+def test_modeld_rejects_unknown_pkl_layout():
+  """読めない pkl は KeyError ではなく「何が違うか」を言って落ちること (09-20)。
+
+  素の `KeyError('run_policy')` は原因がロック競合に見え、`_chestnut_recover.ps1` も
+  `LOCK=SELF` と誤判定した。jits/metadata のキーを添えて落とせば 1 秒で判る。
+  """
+  src = _read(MODELD_PY)
+  assert 'unsupported pkl layout' in src, '未知 pkl の明示エラーが消えている'
+  # ⚠ stateful (CTMv3) を足したので条件が 3 つになっている
+  pattern = r"not self\.is_run_model and not self\.is_stateful and 'run_policy' not in jits"
+  assert re.search(pattern, src), '契約の照合が消えている = また KeyError で死んで原因が分からなくなる'
+
+
 def test_scc_map_gating_survives():
   """SCC-M: GPS が古いときに地図由来の減速を使わないためのゲート。"""
   assert _literal(SCC_MAP_PY, 'GPS_STALE_S') == 2.0
