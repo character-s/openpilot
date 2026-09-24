@@ -8,6 +8,7 @@ See the LICENSE.md file in the root directory for more details.
 
 from collections.abc import Callable
 import os
+import sys
 import traceback
 os.environ['GMMU'] = '0'
 import numpy as np
@@ -490,8 +491,14 @@ def main(demo=False):
       # GS450h: 転送と推論の前にパッケージ電力を絞る。stock の 170W はブースト時に入力へ
       # 瞬間 116W を要求し、PD 充電器の定格を超えて給電が落ちる (chestnut_power_limit 参照)。
       # ⚠ 失敗しても続行する (絞れなくても従来どおり動く)。効いたかは chestnutState.powerLimitW で見る。
-      apply_power_limit(get_power_limit())
+      limit = get_power_limit()
+      applied = apply_power_limit(limit)
       m = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=True)
+      # ⚠⚠ USB reset 直後の初回 open は `flush_tlb timeout` で落ちることがあり、そのとき上の適用は不発のまま
+      # ModelState が次の open で成功する = **stock 170W で走る** (09-24 実車: 不発 → 1.5 分後に Device hang)。
+      # デバイスが確実に開いた今、効いていなければもう一度掛ける (warmup = 最初の推論より前)。
+      if limit > 0 and applied != limit:
+        apply_power_limit(limit)
       m.warmup()
       return m
 
@@ -724,4 +731,14 @@ if __name__ == "__main__":
         reset_chestnut()
     except Exception:
       cloudlog.exception("reset_chestnut on crash failed")
+    # GS450h: ⚠⚠ eGPU を開いていたら interpreter の後始末を飛ばして即座に死ぬ。
+    # 普通に raise すると atexit の tinygrad `Device.finalize()` (fini・バッファ解放) が **ハングした /
+    # いま reset した** GPU に timeout 待ちを積み上げ、プロセスが ~5 分死なない。manager は exitcode が
+    # 出るまで再起動できない (reap_if_crashed) ので、その間 big は戻らない (09-24 実車で 2 回とも 4 分 50 秒)。
+    from tinygrad.device import Device
+    if "AMD" in Device._opened_devices:
+      traceback.print_exc()
+      sys.stdout.flush()
+      sys.stderr.flush()
+      os._exit(1)
     raise

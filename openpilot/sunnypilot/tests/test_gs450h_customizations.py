@@ -567,8 +567,31 @@ def test_chestnut_power_limit_survives():
   assert _literal(CHESTNUT_POWER_PY, 'KEY_POWER_LIMIT') == 'ChestnutPowerLimit'
   assert _literal(CHESTNUT_POWER_PY, 'PARAM_DIR') == '/data/params_fork/d', 'openpilot の Params に戻すと manager 起動のたびに消える'
   src = _read(MODELD_PY)
-  assert 'apply_power_limit(get_power_limit())' in src, '電力上限の適用が big のロードから外れている'
+  assert 'applied = apply_power_limit(limit)' in src, '電力上限の適用が big のロードから外れている'
   assert _read(CHESTNUT_POWER_PY).count('limit_w <= 0') >= 1, 'stock (0) へ戻す分岐が消えている'
+  # ⚠⚠ 09-24: USB reset 直後の初回 open が `flush_tlb timeout` で落ちて適用が不発 → ModelState は次の open で
+  # 成功して **170W のまま**走り、1.5 分で Device hang。⇒ ModelState の後 (warmup の前) に掛け直しが要る。
+  make_big = src[src.index('def make_big'):]
+  make_big = make_big[:make_big.index('return m')]
+  assert re.search(r'if limit > 0 and applied != limit:\s*apply_power_limit\(limit\)', make_big), \
+    '不発時の掛け直しが消えた (USB reset 後の再ロードで 170W のまま走る)'
+  assert make_big.index('ModelState(') < make_big.rindex('apply_power_limit(limit)') < make_big.index('m.warmup()'), \
+    '掛け直しは「デバイスが開いた後 (ModelState の後) かつ最初の推論 (warmup) の前」でないと意味が無い'
+
+
+def test_crash_exit_skips_tinygrad_finalize():
+  """09-24: crash したプロセスが 4 分 50 秒死なず、その間 big が戻らなかった (実車 2 回)。
+
+  普通に raise すると atexit の tinygrad `Device.finalize()` が、ハングした / 直前に reset した GPU に
+  timeout 待ちを積み上げる。manager は exitcode が出るまで再起動できない ⇒ eGPU を開いていたら
+  snapshot と reset の **後で** `os._exit` する。⚠ 順序が逆だと診断ログと USB reset を失う。
+  """
+  src = _read(MODELD_PY)
+  main = src[src.index('if __name__ == "__main__":'):]
+  assert '"AMD" in Device._opened_devices' in main and 'os._exit(1)' in main, \
+    'crash 時に interpreter の後始末を飛ばしていない (終了に ~5 分かかり big が戻らない)'
+  for step in ('sentry.capture_exception()', 'save_chestnut_snapshot("-crash")', 'reset_chestnut()'):
+    assert main.index(step) < main.index('os._exit(1)'), f'{step} より先に os._exit している (診断/復帰を失う)'
 
 
 def test_long_smooth_cap_survives():
