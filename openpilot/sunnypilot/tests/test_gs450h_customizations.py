@@ -61,6 +61,8 @@ CAR_EVENTS_PY = 'openpilot/selfdrive/car/car_events.py'
 LONG_PLANNER_PY = 'openpilot/selfdrive/controls/lib/longitudinal_planner.py'
 SELFDRIVED_PY = 'openpilot/selfdrive/selfdrived/selfdrived.py'
 MODELD_HELPERS_PY = 'openpilot/selfdrive/modeld/helpers.py'
+HARDWARED_PY = 'openpilot/system/hardware/hardwared.py'
+STALL_WATCHDOG_PY = 'openpilot/system/hardware/stall_watchdog.py'
 PROCESS_PY = 'openpilot/system/manager/process.py'
 PROCESS_CONFIG_PY = 'openpilot/system/manager/process_config.py'
 OSM_MAP_DATA_PY = 'openpilot/sunnypilot/mapd/live_map_data/osm_map_data.py'
@@ -970,6 +972,7 @@ def test_modeld_keeps_raise_and_restart_instead_of_small_fallback():
 GS_MODELD_HELPERS = [
   'chestnut_device_path', 'reset_chestnut', 'save_dmesg_snapshot', 'capture_stdio', 'save_stdio_snapshot',
   'USBDEVFS_RESET', 'GPU_FAULT_MARKERS', 'CRASH_DIR',
+  '_write_crash_file',  # 09-26: hardwared の stall watchdog も書き出しに使う
 ]
 
 
@@ -977,6 +980,22 @@ GS_MODELD_HELPERS = [
 def test_gs_modeld_helper_survives(name):
   """helpers.py の GS 追加分。⚠ 上流 master (09-01) が同じファイルの import 行を書き換えたので次の追従で実競合する。"""
   assert name in _toplevel_names(MODELD_HELPERS_PY), f'{MODELD_HELPERS_PY} から {name} が消えた'
+
+
+def test_hardwared_stall_watchdog_survives():
+  """09-26: hardwared のループが ~7.5s 止まって deviceState が途切れ、commIssue で強制解除された (09-21 / 09-25 の計 4 回)。
+
+  他のサービスは止まっておらず、hardwared はその間 CPU を使っていない = カーネル内の待ち。どの呼び出しかを
+  特定するための計測 (止まった瞬間の Python スタック / カーネル側の待ち場所 / dmesg を crash 置き場へ)。
+  ⚠ hardwared.py は上流がよく触る。追従で上流版に戻ると計測が黙って消え、次の commIssue が空振りになる。
+  """
+  src = _read(HARDWARED_PY)
+  thread = src[src.index('def hardware_thread('):]
+  thread = thread[:thread.index('\ndef ', 1)]
+  assert 'StallWatchdog(' in thread and 'stall_watchdog.start()' in thread, 'hardware_thread で watchdog を起こしていない'
+  loop = thread[thread.index('while not end_event.is_set():'):].split('\n')
+  assert loop[1].strip() == 'stall_watchdog.beat()', 'beat() がループの先頭に無い (sm.update 側で止まったときを取りこぼす)'
+  assert 'dump_traceback_later' in _read(STALL_WATCHDOG_PY), 'GIL を握ったまま止まってもスタックを取れる経路が消えた'
 
 
 def test_tinygrad_flock_self_contention_fix_survives():

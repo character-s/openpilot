@@ -28,6 +28,8 @@ from openpilot.sunnypilot.system.statsd import statlog
 from openpilot.system.hardware.power_monitoring import PowerMonitoring
 from openpilot.system.hardware.fan_controller import FanController
 from openpilot.system.hardware.chestnut.status import ChestnutStatus
+from openpilot.system.hardware.stall_watchdog import StallWatchdog
+from openpilot.selfdrive.modeld.helpers import _write_crash_file, save_dmesg_snapshot
 from openpilot.common.version import terms_version, training_version, get_build_metadata, terms_version_sp
 
 ThermalStatus = log.DeviceState.ThermalStatus
@@ -247,7 +249,15 @@ def hardware_thread(end_event, hw_queue) -> None:
   chestnut_status = ChestnutStatus()
   branch = get_short_branch()
 
+  # GS450h: このループが ~7.5s 止まって deviceState が途切れ、commIssue で強制解除される (09-21 / 09-25)。
+  # 止まった瞬間の Python スタック / カーネル側の待ち場所 / dmesg を crash 置き場に残す (stall_watchdog.py)。
+  stall_watchdog = StallWatchdog("hardwared", log_event=cloudlog.event,
+                                 write_report=lambda text: _write_crash_file("hwstall", "", text),
+                                 save_dmesg=lambda: save_dmesg_snapshot("-hwstall"))
+  stall_watchdog.start()
+
   while not end_event.is_set():
+    stall_watchdog.beat()
     sm.update(PANDA_STATES_TIMEOUT)
 
     pandaStates = sm['pandaStates']
