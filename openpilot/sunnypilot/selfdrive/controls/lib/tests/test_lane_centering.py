@@ -579,14 +579,50 @@ def test_highspeed_releases_authority_only_when_strengthened():
   assert _authority_scale_for(22.0, 0.60) == pytest.approx(0.0)        # 79km/h で完全に外れる
 
 
-@pytest.mark.parametrize("hs_gain,expect", [(0.30, 0.6), (0.45, 0.9), (0.60, 1.2), (0.80, 1.6)])
-def test_highspeed_scales_the_lat_accel_as_configured(hs_gain, expect):
-  """実効 la が設定どおり `expect × (|err| - deadband)` になること (標準 0.6 の何倍か)。"""
+@pytest.mark.parametrize("hs_gain,expect,deadband", [(0.30, 0.6, 0.08), (0.45, 0.9, 0.07), (0.60, 1.2, 0.06), (0.80, 1.6, 0.04)])
+def test_highspeed_scales_the_lat_accel_as_configured(hs_gain, expect, deadband):
+  """実効 la が設定どおり `expect × (|err| - deadband)` になること (標準 0.6 の何倍か)。
+
+  09-24 / 10-05: 強くしたときは 79km/h 以上で不感帯も強度別に下がる (x2.0 = 0.06 / x2.7 = 0.04、standard は 0.08 のまま)。
+  """
   err, speed = 0.3, 25.0
   controller = LaneCenteringController()
   # ⚠ 既定 (x2.0) に依存せず、値ごとに固定して測る
   steady = _feed(controller, _model(left=-1.5, right=2.1), 300, speed=speed, highspeed_gain=hs_gain)
-  assert np.isclose(steady * speed ** 2, expect * (err - 0.08), rtol=1e-3)
+  assert np.isclose(steady * speed ** 2, expect * (err - deadband), rtol=1e-3)
+
+
+def test_highspeed_deadband_only_when_strengthened():
+  """高速の不感帯 (09-24) も「強くする」を選んだときだけ・61-79km/h で 0.08 → 強度別の値 (x2.7 = 0.04)。
+
+  standard は従来と 1 bit も同じ = 退避先。低速スケジュール (29-45km/h) は設定に関係なく不変。
+  """
+  for v in (12.5, 17.0, 20.0, 25.0, 35.0):
+    assert _deadband_for(v, _MAX_GAIN) == pytest.approx(0.08)
+  assert _deadband_for(17.0, _MAX_HIGHSPEED_GAIN) == pytest.approx(0.08)   # 61km/h = まだ下げない
+  assert _deadband_for(19.5, _MAX_HIGHSPEED_GAIN) == pytest.approx(0.06)
+  assert _deadband_for(22.0, _MAX_HIGHSPEED_GAIN) == pytest.approx(0.04)   # 79km/h で満額
+  assert _deadband_for(35.0, _MAX_HIGHSPEED_GAIN) == pytest.approx(0.04)
+  for v in (2.5, 5.0, 8.0, 10.0, 12.5, 15.0):
+    assert _deadband_for(v, _MAX_HIGHSPEED_GAIN) == pytest.approx(_deadband_for(v))
+
+
+@pytest.mark.parametrize("hs_gain,deadband", [(0.45, 0.07), (0.60, 0.06), (0.80, 0.04)])
+def test_highspeed_deadband_follows_the_strength(hs_gain, deadband):
+  """10-05 user 決定: x2.0 (0.60) で 0.06 / x2.7 (0.80) で 0.04、x1.5 は間の 0.07。79km/h 以上で満額、61km/h は 0.08。"""
+  assert _deadband_for(22.0, hs_gain) == pytest.approx(deadband)
+  assert _deadband_for(30.0, hs_gain) == pytest.approx(deadband)
+  assert _deadband_for(17.0, hs_gain) == pytest.approx(0.08)
+
+
+def test_highspeed_deadband_acts_on_the_small_offset():
+  """0.06m のずれ (09-24 の平衡点付近) は standard だと不感帯の内側で何もしない / 強くすると中心へ戻す。"""
+  model = _model(left=-1.5, right=1.62)    # 中心が +0.06m 右
+  _, standard = _converge(model, speed=25.0)
+  _, strong = _converge(model, speed=25.0, highspeed_gain=_MAX_HIGHSPEED_GAIN)
+  assert standard == 0.0
+  assert strong > 0.0
+  assert np.isclose(strong * 25.0 ** 2, 1.6 * (0.06 - 0.04), rtol=1e-3)
 
 
 def test_highspeed_gain_is_clipped_to_the_choice_range():
