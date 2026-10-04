@@ -54,6 +54,13 @@ _LOWSPEED_LOOKAHEAD_MIN = 6.0  # [m] (高速側 8.0)
 _HIGHSPEED_V = (17.0, 22.0)        # [m/s] 61〜79km/h で切り替え
 _MAX_HIGHSPEED_GAIN = 0.80         # 設定の上限 (lcp.HIGHSPEED_GAIN_CHOICES の最大と一致させる)
 _HIGHSPEED_AUTHORITY_SCALE = 0.0   # 79km/h 以上では authority を 0 = 引っ込めない
+# ★ GS 追加 (09-24): 高速の不感帯。x2.7 (0.80) にした後のカーブの平衡点は中心から 0.10m イン側で、
+#   不感帯 0.08 の床に張り付いている (09-15 の 0.205m → 0.101m、`_lane_analysis.py --only=drift`)。
+#   ゲインを上げても 0.08 に漸近するだけ = 効く余地は床を下げる方にしかない。
+#   強度に合わせて段階的に下げる (user 10-05): x2.0 (0.60) → 0.06 / x2.7 (0.80) → 0.04、間は線形 (x1.5 = 0.07)。
+#   ⚠ ゲイン・authority と同じく「強くする」を選んだときだけ効く (standard なら従来と 1 bit も同じ)。
+_HIGHSPEED_DEADBAND_GAINS = (0.30, 0.60, 0.80)   # = (_MAX_GAIN, 既定, _MAX_HIGHSPEED_GAIN)
+_HIGHSPEED_DEADBAND = (0.08, 0.06, 0.04)
 
 
 def _gain_for(v_ego: float, highspeed_gain: float = _MAX_GAIN) -> float:
@@ -72,8 +79,17 @@ def _authority_scale_for(v_ego: float, highspeed_gain: float = _MAX_GAIN) -> flo
     return 1.0
   return float(np.interp(v_ego, _HIGHSPEED_V, (1.0, _HIGHSPEED_AUTHORITY_SCALE)))
 
-def _deadband_for(v_ego: float) -> float:
-  return float(np.interp(v_ego, _LOWSPEED_V, (_LOWSPEED_DEADBAND, _CENTER_ERROR_DEADBAND)))
+def _deadband_for(v_ego: float, highspeed_gain: float = _MAX_GAIN) -> float:
+  """低速 (29-45km/h で 0.04 → 0.08) と、強くしたときだけの高速 (61-79km/h で 0.08 → 強度別の値) の 2 段。
+
+  ⚠ _gain_for と同じく 4 点 1 本の interp = x が昇順でないと np.interp が黙って誤る。
+  """
+  if highspeed_gain <= _MAX_GAIN:
+    return float(np.interp(v_ego, _LOWSPEED_V, (_LOWSPEED_DEADBAND, _CENTER_ERROR_DEADBAND)))
+  highspeed_deadband = float(np.interp(highspeed_gain, _HIGHSPEED_DEADBAND_GAINS, _HIGHSPEED_DEADBAND))
+  return float(np.interp(v_ego,
+                         (_LOWSPEED_V[0], _LOWSPEED_V[1], _HIGHSPEED_V[0], _HIGHSPEED_V[1]),
+                         (_LOWSPEED_DEADBAND, _CENTER_ERROR_DEADBAND, _CENTER_ERROR_DEADBAND, highspeed_deadband)))
 
 def _lookahead_min_for(v_ego: float) -> float:
   return float(np.interp(v_ego, _LOWSPEED_V, (_LOWSPEED_LOOKAHEAD_MIN, 8.0)))
@@ -251,6 +267,7 @@ class LaneCenteringController:
       v_ego,
       float(np.clip(offset, -_MAX_OFFSET, _MAX_OFFSET)),
       float(np.clip(e2e_authority, 0.0, 1.0)) * _authority_scale_for(v_ego, highspeed_gain),
+      _deadband_for(v_ego, highspeed_gain),
     )
     if not valid:
       # 白線を見失った瞬間に補正を切ると段差になるので、0.2s で抜く
@@ -268,7 +285,8 @@ class LaneCenteringController:
   def _covers(x, distance: float) -> bool:
     return bool(x[0] <= distance <= x[-1])
 
-  def _raw_correction(self, model_v2, v_ego: float, offset: float, e2e_authority: float) -> tuple[bool, float]:
+  def _raw_correction(self, model_v2, v_ego: float, offset: float, e2e_authority: float,
+                      deadband: float | None = None) -> tuple[bool, float]:
     try:
       lane_lines = model_v2.laneLines
       probs = np.asarray(model_v2.laneLineProbs, dtype=float)
@@ -320,7 +338,8 @@ class LaneCenteringController:
       model_y = float(np.interp(lookahead, pos_x, pos_y))
       error = target_y - model_y
       error_abs = abs(error)
-      deadband = _deadband_for(v_ego)
+      if deadband is None:
+        deadband = _deadband_for(v_ego)
       if error_abs <= deadband:
         error = 0.0
       else:

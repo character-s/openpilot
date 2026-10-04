@@ -497,6 +497,11 @@ def test_lane_centering_highspeed_schedule_survives():
   src = _read(LC_PY)
   assert '_authority_scale_for(v_ego, highspeed_gain)' in src,     'authority の速度スケジュールが呼ばれていない = 定数だけ載って本体が落ちた'
   assert '_gain_for(v_ego, highspeed_gain)' in src,     'ゲインに設定値が渡っていない = 高速スケジュールが死んでいる'
+  # 09-24: 高速の不感帯を強くしたときだけ下げる。平衡点が 0.08 の床に張り付いていたため。
+  # 10-05 user 決定: x2.0 (0.60) = 0.06 / x2.7 (0.80) = 0.04。
+  assert _literal(LC_PY, '_HIGHSPEED_DEADBAND_GAINS') == (0.30, 0.60, 0.80)
+  assert _literal(LC_PY, '_HIGHSPEED_DEADBAND') == (0.08, 0.06, 0.04)
+  assert '_deadband_for(v_ego, highspeed_gain)' in src, '不感帯に設定値が渡っていない = 高速の不感帯が死んでいる'
   assert 'KEY_HIGHSPEED_GAIN' in _read(MICI_TOGGLES_PY), 'UI に高速強度の行が載っていない'
 
 
