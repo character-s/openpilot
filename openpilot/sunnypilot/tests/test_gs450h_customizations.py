@@ -555,7 +555,8 @@ def test_crash_exit_skips_tinygrad_finalize():
   main = src[src.index('if __name__ == "__main__":'):]
   assert '"AMD" in Device._opened_devices' in main and 'os._exit(1)' in main, \
     'crash 時に interpreter の後始末を飛ばしていない (終了に ~5 分かかり big が戻らない)'
-  for step in ('sentry.capture_exception()', 'save_chestnut_snapshot("-crash")', 'reset_chestnut()'):
+  # ⚠ 10-08 追従: 上流が sentry を廃止したので、crash の記録は cloudlog.exception に変わった
+  for step in ('cloudlog.exception("modeld exception")', 'save_chestnut_snapshot("-crash")', 'reset_chestnut()'):
     assert main.index(step) < main.index('os._exit(1)'), f'{step} より先に os._exit している (診断/復帰を失う)'
 
 
@@ -766,7 +767,7 @@ def test_pandad_binary_carries_the_send_priority_patch():
 
   blob = (REPO_ROOT / PANDAD_BIN).read_bytes()
   assert b'panda_send_pending' in blob, (
-    'pandad のバイナリが上流の配布版に戻っている = ソースが直っていても実機では E2 が効かない。'
+    'pandad のバイナリが上流の配布版に戻っている = ソースが直っていても実機では E2 が効かない。' +
     'c4 で焼き直してこのファイルを差し替えること (手順は docstring)'
   )
 
@@ -1018,6 +1019,7 @@ def test_mici_update_hash_first_survives():
   assert re.search(r'InstallUpdateButton[\s\S]{0,400}scroll_value=True', _read(MICI_SOFTWARE_PY)), \
     'InstallUpdateButton が scroll_value=True を渡していない'
   src = _read(MICI_BUTTON_PY)
-  assert re.search(r'def __init__\(self, text: str, value: str = "", icon: .*scroll: bool = False,\s*\n\s*scroll_value: bool \| None = None\)', src), \
+  # ⚠ 10-08 追従: 上流が BigButton に kw-only の description / description_icon を足したので、scroll_value の後ろは `)` か `, *,`
+  assert re.search(r'def __init__\(self, text: str, value: str = "", icon: .*scroll: bool = False,\s*\n\s*scroll_value: bool \| None = None(\)|, \*,)', src), \
     'BigButton.__init__ の scroll_value 引数が落ちている (software.py 側が TypeError で落ちる)'
   assert re.search(r'if self\._scroll or self\._scroll_value:', src), 'value 行のスクロール背景が落ちている'

@@ -66,7 +66,8 @@ def position_from_param(param: str, params: Params) -> tuple[Coordinate | None, 
     return pos, False
 
   ts = data.get("unixMillis")
-  if ts is None or (time.time() * 1e3 - float(ts)) > GPS_STALE_S * 1e3:
+  # unixMillis は mapd が壁時計で付けた時刻なので、ここも壁時計で比べるのが正しい (osm_map_data.py と対)
+  if ts is None or (time.time() * 1e3 - float(ts)) > GPS_STALE_S * 1e3:  # noqa: TID251
     return pos, False
 
   return pos, True
