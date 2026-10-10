@@ -145,6 +145,9 @@ enum LongitudinalPersonality {
   aggressive @0;
   standard @1;
   relaxed @2;
+  # GS450h 追加 (10-10): aggressive (1.25s) よりさらに詰める段。末尾に足すので既存の 0-2 の意味は変わらない。
+  # ⚠ cereal/gen/cpp は再生成していない (C++ 側でこの値を読む箇所は無い。Python は起動時にこの .capnp を読む)。
+  moreAggressive @3;
 }
 
 struct InitData {

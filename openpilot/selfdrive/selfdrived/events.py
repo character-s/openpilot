@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import math
 import os
+import re
 
 from openpilot.cereal import log
 from opendbc.car.structs import car
@@ -193,7 +194,8 @@ def longitudinal_maneuver_alert(CP: car.CarParams, CS: car.CarState, sm: messagi
 
 
 def personality_changed_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
-  personality = str(personality).title()
+  # GS450h: moreAggressive を "More Aggressive" と出す (title() だけだと "Moreaggressive" になる)
+  personality = re.sub(r'(?<!^)(?=[A-Z])', ' ', str(personality)).title()
   return NormalPermanentAlert(f"Driving Personality: {personality}", duration=1.5)
 
 

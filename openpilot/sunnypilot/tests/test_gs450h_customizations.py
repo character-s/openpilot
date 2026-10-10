@@ -36,6 +36,7 @@ CARCONTROLLER_PY = 'opendbc_repo/opendbc/car/toyota/carcontroller.py'
 LONGCONTROL_PY = 'openpilot/selfdrive/controls/lib/longcontrol.py'
 DRIVE_HELPERS_PY = 'openpilot/selfdrive/controls/lib/drive_helpers.py'
 LONG_MPC_PY = 'openpilot/selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py'
+CEREAL_LOG_CAPNP = 'openpilot/cereal/log.capnp'
 # acados が生成した cost 関数。STOP_DISTANCE はここに焼き付いており、実機が見るのはこちら
 LONG_COST_C = 'openpilot/selfdrive/controls/lib/longitudinal_mpc_lib/c_generated_code/long_cost/long_cost_y_fun.c'
 MODELD_PY = 'openpilot/sunnypilot/modeld_v2/modeld.py'
@@ -343,6 +344,30 @@ def test_stop_distance_matches_compiled_cost():
     + 'Python 側の変更は実機に効かない。停止位置を動かすなら EXTRA_STOP_DISTANCE を使う')
 
 
+def test_more_aggressive_personality_survives():
+  """10-10 追加: 4 段目の personality `moreAggressive` (@3、T_FOLLOW 1.0s、user「MORE aggressive が欲しい」)。
+
+  ⚠ enum に足しただけだと selfdrived が範囲外として 0-2 に丸める / 車間ボタンが 3 段で回る / 画面に出ない、の
+  どれかで死ぬので、通り道を全部見る。⚠ t_follow は MPC の実行時パラメータ (params[:,4]) なので
+  STOP_DISTANCE と違ってコンパイル済み C を作り直さなくても効く (ここも崩れていないことを見る)。
+  """
+  assert re.search(r'^\s*moreAggressive @3;', _read(CEREAL_LOG_CAPNP), re.MULTILINE), 'log.capnp から moreAggressive @3 が消えた'
+  mpc = _read(LONG_MPC_PY)
+  m = re.search(r'personality==log\.LongitudinalPersonality\.moreAggressive:\s*\n(?:\s*#.*\n)*\s*return ([0-9.]+)\n\s*else:', mpc)
+  assert m, 'get_T_FOLLOW に moreAggressive の分岐が無い (NotImplementedError で plannerd が落ちる)'
+  assert float(m.group(1)) == 1.0
+  assert mpc.count('LongitudinalPersonality.moreAggressive') == 2, 'get_jerk_factor / get_T_FOLLOW の両方に要る'
+  assert 'self.params[:,4] = t_follow' in mpc, 't_follow が実行時パラメータで渡っていない = コンパイル済み C を作り直さないと効かない'
+  assert '% len(LONGITUDINAL_PERSONALITY_MAP)' in _read(SELFDRIVED_PY), '車間ボタンの循環が 3 段のまま = moreAggressive に回らない'
+  assert '"more aggressive"]' in _read(MICI_TOGGLES_PY), '設定画面に 4 段目が無い (index = enum 番号なので末尾)'
+  # 10-10: more aggressive だけ巡航の加速上限 1.25 倍 (前車に離される量の 34% がこの上限張り付きだった)
+  planner = _read(LONG_PLANNER_PY)
+  assert _literal(LONG_PLANNER_PY, 'MORE_AGGRESSIVE_ACCEL_SCALE') == 1.25
+  assert 'personality == log.LongitudinalPersonality.moreAggressive' in planner
+  assert "self.allow_throttle, sm['selfdriveState'].personality)" in planner, \
+    'get_cruise_accel に personality が渡っていない = 上限の引き上げが死んでいる'
+
+
 def test_pln1_7_extra_stop_distance_survives():
   """PLN-1_7: 停止時だけ x_obstacle を手前に引いて前車への詰めすぎを直す。
 
@@ -356,6 +381,13 @@ def test_pln1_7_extra_stop_distance_survives():
   # 実際に x_obstacle から引かれているか (定数だけ残って適用が落ちる追従事故を防ぐ)
   assert src.count('- get_extra_stop_distance(') == 2, \
     'lead_0_obstacle / lead_1_obstacle の両方から引かれていない'
+  # 10-10: 上乗せは「走ってきて止まる」ときだけ (停止から少し進むだけなら 0 = 停止目標 6m)。
+  # ⚠ 今の自車速度ではなく「止まってからの最高速」で判定すること (今の速度だと走ってきた停止も 0.5m 縮む)。
+  assert _literal(LONG_MPC_PY, 'EXTRA_STOP_EGO_BP') == [2.0, 4.0]
+  assert src.count('get_extra_stop_distance(lead_xv_0[:,1], self.v_max_since_stop)') == 1, \
+    '止まってからの最高速が渡っていない = 少し進んで止まり直すと 7-8m 空く挙動に戻る'
+  assert src.count('get_extra_stop_distance(lead_xv_1[:,1], self.v_max_since_stop)') == 1
+  assert 'self.v_max_since_stop = 0.0 if v_ego < EXTRA_STOP_STANDSTILL_V' in src, '停止で最高速を戻していない'
   assert 'PLN-1_7' in src, 'PLN-1_7 の由来コメントが消えている'
 
 
