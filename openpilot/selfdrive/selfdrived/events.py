@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import math
 import os
+import re
 
 from openpilot.cereal import log
 from opendbc.car.structs import car
@@ -193,8 +194,9 @@ def longitudinal_maneuver_alert(CP: car.CarParams, CS: car.CarState, sm: messagi
 
 
 def personality_changed_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
-  personality = str(personality).title()
-  return NormalPermanentAlert(f"Following Distance: {personality}", duration=1.5)
+  # GS450h: moreAggressive を "More Aggressive" と出す (title() だけだと "Moreaggressive" になる)
+  personality = re.sub(r'(?<!^)(?=[A-Z])', ' ', str(personality)).title()
+  return NormalPermanentAlert(f"Driving Personality: {personality}", duration=1.5)
 
 
 def invalid_lkas_setting_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
@@ -832,10 +834,6 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
 
   EventName.userBookmark: {
     ET.PERMANENT: NormalPermanentAlert("Bookmark Saved", duration=1.5),
-  },
-
-  EventName.userBookmarkNotPaired: {
-    ET.PERMANENT: NormalPermanentAlert("Bookmark Saved", "pair to connect\nto view", duration=1.5),
   },
 }
 

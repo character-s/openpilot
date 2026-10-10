@@ -3,6 +3,7 @@ import math
 import numpy as np
 
 import openpilot.cereal.messaging as messaging
+from openpilot.cereal import log
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
@@ -20,6 +21,10 @@ from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import Lon
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 J_CRUISE_VALS = [1.6, 1.2, 0.8, 0.6]
+# GS450h (10-10): more aggressive だけ巡航の加速上限を 1.25 倍 (最終的には ACCEL_MAX 1.5 で頭打ち)。
+# 実測 (0b8-0c9): 目標より遠いのに前車に離された量の 34% がこの上限に張り付いていた (6 割は 30km/h 未満の発進)。
+# shadow (`_stop_mpc_sim.py` 流用) で、前車が加速したときの車間の遅れ 7-14% 減。⚠ ACC 側 (非 e2e) でだけ効く。
+MORE_AGGRESSIVE_ACCEL_SCALE = 1.25
 # PLN-5 (2026-09-06): 巡航の減速要求は摩擦ブレーキに入らない深さまでにする (user 判断)。
 # a_cruise = clip(v_cruise - v_ego, A_CRUISE_MIN, max_accel) は設定速度との差 (m/s) をそのまま
 # 加速度 (m/s^2) にするので、設定を 10km/h 下げただけで即 -1.2 が立つ。GS 450h の回生では出ない
@@ -63,8 +68,11 @@ def get_max_accel(v_ego):
 def get_coast_accel(pitch):
   return np.sin(pitch) * -5.65 - 0.3  # fitted from data using xx/projects/allow_throttle/compute_coast_accel.py
 
-def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, accel_coast, allow_throttle):
+def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, accel_coast, allow_throttle,
+                     personality=log.LongitudinalPersonality.standard):
   max_accel = ACCEL_MAX if e2e else get_max_accel(v_ego)
+  if not e2e and personality == log.LongitudinalPersonality.moreAggressive:   # GS450h
+    max_accel = min(max_accel * MORE_AGGRESSIVE_ACCEL_SCALE, ACCEL_MAX)
 
   if not e2e:
     a_total_max = np.interp(v_ego, _A_TOTAL_MAX_BP, _A_TOTAL_MAX_V)
@@ -182,7 +190,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     self.a_cruise = get_cruise_accel(is_e2e, v_cruise, v_ego,
                                      self.a_cruise, steer_angle_without_offset, self.CP, self.dt,
-                                     accel_coast, self.allow_throttle)
+                                     accel_coast, self.allow_throttle, sm['selfdriveState'].personality)
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
     candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),

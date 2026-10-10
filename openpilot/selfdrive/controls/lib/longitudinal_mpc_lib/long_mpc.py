@@ -70,6 +70,14 @@ STOP_DISTANCE = 6.0
 # 実測と shadow = archive/probes/_stop_creep.py / _stop_mpc_sim.py。
 EXTRA_STOP_DISTANCE = 2.0
 EXTRA_STOP_DISTANCE_BP = [1.0, 3.0]  # [m/s] 前車速度。この区間で全量 -> 0
+# GS450h (10-10): 上乗せは「走ってきて止まる」ときだけ。前回止まってから自車が一度も EGO_BP[1] まで
+# 出ていない (= 停止から前車に付いて少し進むだけ) なら 0 にフェードし、停止目標を STOP_DISTANCE (6m) に戻す。
+# 実測 (0b8-0c9、gas なし 10 件): 少し進んで止まり直すと MPC 主導で p50 7.4m 空いていた (走ってきた停止は p50 約 5m)。
+# shadow (`_stop_mpc_sim.py` 流用): 前車が 3.8-8m 進んで止まる場面で再停止車間 6.4-6.8m → 4.4-5.2m。
+# ⚠ 単純に「今の自車速度」でフェードすると、走ってきた停止でも最後の低速域で上乗せが抜けて停止車間が 0.5-0.6m 縮む
+#   (shadow で確認) ⇒ 今の速度ではなく「止まってからの最高速」で判定する = 走ってきた停止は今までと 1 bit も同じ。
+EXTRA_STOP_EGO_BP = [2.0, 4.0]       # [m/s] 前回停止してからの自車最高速。この区間で 0 -> 全量
+EXTRA_STOP_STANDSTILL_V = 0.1        # [m/s] これ未満を「止まった」とみなして最高速を 0 に戻す
 
 MIN_X_LEAD_FACTOR = 0.5
 
@@ -79,6 +87,8 @@ def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
   elif personality==log.LongitudinalPersonality.standard:
     return 1.0
   elif personality==log.LongitudinalPersonality.aggressive:
+    return 0.5
+  elif personality==log.LongitudinalPersonality.moreAggressive:   # GS450h: 加減速の硬さは aggressive と同じ
     return 0.5
   else:
     raise NotImplementedError("Longitudinal personality not supported")
@@ -91,6 +101,10 @@ def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard):
     return 1.45
   elif personality==log.LongitudinalPersonality.aggressive:
     return 1.25
+  elif personality==log.LongitudinalPersonality.moreAggressive:
+    # GS450h (user 10-10「MORE aggressive が欲しい」): 1.25 → 1.0s = 100km/h で約 7m 近い。
+    # 停止時の車間 (STOP_DISTANCE + EXTRA_STOP_DISTANCE) と制動の余裕 (v²/2·COMFORT_BRAKE) は変えない。
+    return 1.0
   else:
     raise NotImplementedError("Longitudinal personality not supported")
 
@@ -100,9 +114,13 @@ def get_stopped_equivalence_factor(v_lead):
 def get_safe_obstacle_distance(v_ego, t_follow):
   return (v_ego**2) / (2 * COMFORT_BRAKE) + t_follow * v_ego + STOP_DISTANCE
 
-def get_extra_stop_distance(v_lead):
-  """GS450h PLN-1_7: 前車が止まっているときだけ x_obstacle を手前に引く量 [m] (根拠は EXTRA_STOP_DISTANCE の注記)。"""
-  return EXTRA_STOP_DISTANCE * np.interp(v_lead, EXTRA_STOP_DISTANCE_BP, [1.0, 0.0])
+def get_extra_stop_distance(v_lead, v_max_since_stop=np.inf):
+  """GS450h PLN-1_7: 前車が止まっているときだけ x_obstacle を手前に引く量 [m] (根拠は EXTRA_STOP_DISTANCE の注記)。
+
+  v_max_since_stop = 前回停止してからの自車最高速。低ければ (停止から少し進むだけ) 上乗せしない (10-10)。
+  """
+  ego_scale = np.interp(v_max_since_stop, EXTRA_STOP_EGO_BP, [0.0, 1.0])
+  return EXTRA_STOP_DISTANCE * ego_scale * np.interp(v_lead, EXTRA_STOP_DISTANCE_BP, [1.0, 0.0])
 
 def gen_long_model():
   model = AcadosModel()
@@ -263,6 +281,7 @@ class LongitudinalMpc:
     # timers
     self.solve_time = 0.0
     self.x0 = np.zeros(X_DIM)
+    self.v_max_since_stop = 0.0   # GS450h: EXTRA_STOP_EGO_BP の判定用 (前回停止してからの自車最高速)
     self.set_weights()
 
   def set_cost_weights(self, cost_weights, constraint_cost_weights):
@@ -333,14 +352,17 @@ class LongitudinalMpc:
     lead_xv_0 = self.process_lead(radarstate.leadOne)
     lead_xv_1 = self.process_lead(radarstate.leadTwo)
 
+    v_ego = self.x0[1]
+    self.v_max_since_stop = 0.0 if v_ego < EXTRA_STOP_STANDSTILL_V else max(self.v_max_since_stop, v_ego)
+
     # To estimate a safe distance from a moving lead, we calculate how much stopping
     # distance that lead needs as a minimum. We can add that to the current distance
     # and then treat that as a stopped car/obstacle at this new distance.
     # GS450h PLN-1_7: 前車が止まっている区間だけ obstacle を手前に置く (予測 lead 速度で段ごとに判定)。
     lead_0_obstacle = (lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1])
-                       - get_extra_stop_distance(lead_xv_0[:,1]))
+                       - get_extra_stop_distance(lead_xv_0[:,1], self.v_max_since_stop))
     lead_1_obstacle = (lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1])
-                       - get_extra_stop_distance(lead_xv_1[:,1]))
+                       - get_extra_stop_distance(lead_xv_1[:,1], self.v_max_since_stop))
 
     x_obstacles = np.column_stack([lead_0_obstacle, lead_1_obstacle])
     self.source = MPC_SOURCES[np.argmin(x_obstacles[0])]

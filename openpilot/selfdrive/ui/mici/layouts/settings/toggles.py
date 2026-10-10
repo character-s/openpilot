@@ -43,9 +43,12 @@ class TogglesLayoutMici(NavScroller):
   def __init__(self):
     super().__init__()
 
-    self._personality_toggle = BigMultiParamToggle("driving personality", "LongitudinalPersonality", ["aggressive", "standard", "relaxed"],
+    # GS450h: 4 段目 "more aggressive" (enum moreAggressive @3、1.0s)。⚠ 並びは enum の番号順 (index = 保存値) なので末尾に置く。
+    self._personality_toggle = BigMultiParamToggle("driving personality", "LongitudinalPersonality",
+                                                   ["aggressive", "standard", "relaxed", "more aggressive"],
                                                    description="Standard is recommended.\n" +
                                                                "Aggressive follows closer, with firmer gas and braking.\n" +
+                                                               "More aggressive follows closer still (1.0 s).\n" +
                                                                "Relaxed leaves more space.\n" +
                                                                "Use the steering wheel distance button on supported cars.")
     self._experimental_btn = BigToggle("experimental mode", description_icon=gui_app.texture("icons_mici/experimental_mode.png", 64, 64),
