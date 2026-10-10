@@ -1,4 +1,4 @@
-"""Lane Centering の設定 4 つの定義と読み書き。
+"""Lane Centering の設定の定義と読み書き。
 
 ⚠⚠ **なぜ openpilot の Params (`/data/params`) を使わないのか** (2026-08-26 に c4 実機で確定):
 
@@ -16,7 +16,7 @@ manager 起動のたびに `clear_all` を 4 回呼ぶ。sunnypilot の release 
 **manager が起動するたびに消える**。c4 は ACC 連動で毎回コールドブートするので、
 **エンジンをかけるたびに設定が既定値に戻る** = 実用にならない。
 
-⇒ **この 4 つは `/data/params` の外に置く**。`clearAll` は `/data/params/<prefix>/` の中しか
+⇒ **LC の設定は全部 `/data/params` の外に置く**。`clearAll` は `/data/params/<prefix>/` の中しか
 走査しないので、`/data/params_fork/` は**構造的に対象外**になる。`.so` を焼いて配る必要が消え、
 配布バイナリの世代と fork の Python の噛み合わせを人間が保証する運用も要らなくなる
 (`params.py` は `.so` から ctypes で 16 シンボルを引いており、古い `.so` と新しい `params.py` が
@@ -26,7 +26,7 @@ manager 起動のたびに `clear_all` を 4 回呼ぶ。sunnypilot の release 
 params と同じ (`d/` に値、その親に `.tmp_value_*`) にしてあるので、将来 params 本体へ
 戻すときは `d/` の中身をそのまま移せる。fork が今後足す設定もここに置けばよい。
 
-⚠ **代償**: params の `BACKUP` フラグに乗らないので端末初期化時の自動復元が効かない。4 項目を
+⚠ **代償**: params の `BACKUP` フラグに乗らないので端末初期化時の自動復元が効かない。全項目を
 UI で入れ直すことになる。それと引き換えに「起動のたびに消える」を消している。
 
 ⚠ **Params は読みも書きも一切経由しない**。経由すると `.so` が焼かれた端末とそうでない端末で
@@ -34,7 +34,7 @@ UI で入れ直すことになる。それと引き換えに「起動のたび�
 が**必ず既定値を返す**ので、Params を先に見るとファイルの値が黙って無視される)。値の出所は
 このモジュールが読むファイル 1 本に固定する。
 
-このモジュールが 4 つの定義 (既定値・範囲・UI の選択肢) の**唯一の出所**。制御側
+このモジュールが LC 設定の定義 (既定値・範囲・UI の選択肢) の**唯一の出所**。制御側
 (`lane_centering.py`) と UI 側 (`selfdrive/ui/mici/widgets/lane_centering.py`) の両方がここを見る。
 
 ⚠ 依存は標準ライブラリだけに保つこと。`lane_centering.py` が numpy 以外を引かないのと同じ理由で、
@@ -55,6 +55,8 @@ KEY_OFFSET = "LaneCenterOffset"
 KEY_AUTHORITY = "LaneCenteringE2EAuthority"
 KEY_PAUSE_ON_SIGNAL = "LaneCenteringPauseOnSignal"
 KEY_HIGHSPEED_GAIN = "LaneCenteringHighSpeedGain"
+KEY_MIDSPEED_GAIN = "LaneCenteringMidSpeedGain"
+KEY_ONE_LINE = "LaneCenteringOneLine"
 
 # ⚠ 「値が読めない」= 既定値であって「前回値を維持」ではない — 前回値だと「LaneCentering だけ
 # ファイルを置いた」ときに他の 3 つが更新されず、項目ごとに世代の違う値が混ざる。
@@ -64,6 +66,8 @@ DEFAULTS = {
   KEY_AUTHORITY: 1.0,
   KEY_PAUSE_ON_SIGNAL: True,
   KEY_HIGHSPEED_GAIN: 0.60,   # x2.0 (user 09-16 決定)。0.30 を選べば制御側 _MAX_GAIN = 従来と同一
+  KEY_MIDSPEED_GAIN: 0.45,    # x1.5 = 様子見 (user 10-10)。0.30 を選べば従来と同一
+  KEY_ONE_LINE: True,         # 片側補完 + 短い途切れの保持 (10-10)。OFF で従来と同一
 }
 
 # UI が回す選択肢。⚠ offset の符号はデバイス座標 (y は左が正) に従い **+ が左寄せ**。
@@ -84,6 +88,12 @@ AUTHORITY_CHOICES = (0.0, 0.25, 0.5, 0.75, 1.0)
 # ⇒ 高速で強くして効く先はカーブだけ。authority を外してよいのは、**高速では駐車車両の回避のような
 # 「モデルの意思」がほとんど無い**ため (user 09-16)。
 HIGHSPEED_GAIN_CHOICES = (0.30, 0.45, 0.60, 0.80)
+
+# 中速 (45-61km/h) でのゲイン。**既定 = 0.45 (x1.5、様子見 user 10-10)**、本番候補は x2.0。0.30 = standard で従来と同一。
+# authority (譲る) は変えない = 0.5m を超える回避では今までどおり補正 0。
+# ⚠ 根拠 (10-10 実測): 45-61km/h のカーブは LC が効いていても中心より 0.25m イン側 (gain が全帯で最弱の 0.30)。
+# ⚠ ラベルは highspeed_gain_label を共用する (同じ「標準の何倍か」表記)。
+MIDSPEED_GAIN_CHOICES = (0.30, 0.45, 0.60)
 
 
 def offset_label(v: float) -> str:

@@ -496,13 +496,32 @@ def test_lane_centering_highspeed_schedule_survives():
   assert _literal(LC_PY, '_MAX_GAIN') in _literal(LC_PARAMS_PY, 'HIGHSPEED_GAIN_CHOICES'), 'standard (従来と同一) へ戻す選択肢が消えている'
   src = _read(LC_PY)
   assert '_authority_scale_for(v_ego, highspeed_gain)' in src,     'authority の速度スケジュールが呼ばれていない = 定数だけ載って本体が落ちた'
-  assert '_gain_for(v_ego, highspeed_gain)' in src,     'ゲインに設定値が渡っていない = 高速スケジュールが死んでいる'
+  assert '_gain_for(v_ego, highspeed_gain, midspeed_gain)' in src,     'ゲインに設定値が渡っていない = 高速/中速スケジュールが死んでいる'
   # 09-24: 高速の不感帯を強くしたときだけ下げる。平衡点が 0.08 の床に張り付いていたため。
   # 10-05 user 決定: x2.0 (0.60) = 0.06 / x2.7 (0.80) = 0.04。
   assert _literal(LC_PY, '_HIGHSPEED_DEADBAND_GAINS') == (0.30, 0.60, 0.80)
   assert _literal(LC_PY, '_HIGHSPEED_DEADBAND') == (0.08, 0.06, 0.04)
-  assert '_deadband_for(v_ego, highspeed_gain)' in src, '不感帯に設定値が渡っていない = 高速の不感帯が死んでいる'
+  assert '_deadband_for(v_ego, highspeed_gain, midspeed_gain)' in src, '不感帯に設定値が渡っていない = 高速/中速の不感帯が死んでいる'
   assert 'KEY_HIGHSPEED_GAIN' in _read(MICI_TOGGLES_PY), 'UI に高速強度の行が載っていない'
+
+
+def test_lane_centering_midspeed_and_one_line_survive():
+  """10-10 追加: 中速 (45-61km/h) の強さと片側補完 (+ 短い途切れの保持)。ここは載り漏れ検出だけ。
+
+  ⚠ どちらも **standard / OFF で従来と 1 bit も同じ**に戻せることが要 (UI だけで退避できる)。
+  """
+  assert _literal(LC_PY, '_MAX_MIDSPEED_GAIN') == 0.60
+  assert _literal(LC_PARAMS_PY, 'MIDSPEED_GAIN_CHOICES') == (0.30, 0.45, 0.60)
+  assert _literal(LC_PARAMS_PY, 'KEY_MIDSPEED_GAIN') == 'LaneCenteringMidSpeedGain'
+  assert _literal(LC_PARAMS_PY, 'KEY_ONE_LINE') == 'LaneCenteringOneLine'
+  assert _literal(LC_PY, '_ONE_SIDED_MAX_STD') == 0.2
+  assert _literal(LC_PY, '_ONE_SIDED_GAIN_SCALE') == 0.5
+  assert _literal(LC_PY, '_LINE_JUMP_LIMIT') == 0.50, '片側補完中の跳びガードが落ちている'
+  src = _read(LC_PY)
+  assert '_one_sided_side(' in src and '_update_width_from_noisy_line(' in src, '片側補完の本体が落ちた'
+  toggles = _read(MICI_TOGGLES_PY)
+  assert 'KEY_MIDSPEED_GAIN' in toggles, 'UI に中速強度の行が載っていない'
+  assert 'KEY_ONE_LINE' in toggles, 'UI に片側補完のトグルが載っていない'
 
 
 # ===========================================================================
@@ -599,7 +618,8 @@ def test_lane_centering_ui_is_wired_into_settings():
 # 6) Lane Centering の保存先 (params から切り離した設計)
 # ===========================================================================
 
-LC_KEYS = ['LaneCentering', 'LaneCenterOffset', 'LaneCenteringE2EAuthority', 'LaneCenteringPauseOnSignal']
+LC_KEYS = ['LaneCentering', 'LaneCenterOffset', 'LaneCenteringE2EAuthority', 'LaneCenteringPauseOnSignal',
+           'LaneCenteringHighSpeedGain', 'LaneCenteringMidSpeedGain', 'LaneCenteringOneLine']
 
 
 def test_lane_centering_keys_are_not_declared_in_params_keys_h():
