@@ -12,7 +12,7 @@ import pytest
 from openpilot.sunnypilot.selfdrive.controls.lib import lane_centering_params as lcp
 from openpilot.sunnypilot.selfdrive.controls.lib.lane_centering import (
   LaneCenteringController, _authority_scale_for, _deadband_for, _gain_for, _lookahead_min_for,
-  _MAX_GAIN, _MAX_HIGHSPEED_GAIN,
+  _MAX_GAIN, _MAX_HIGHSPEED_GAIN, _MAX_MIDSPEED_GAIN,
 )
 
 
@@ -39,15 +39,18 @@ def _model(left=-1.8, right=1.8, model_y=0.0, lane_prob=0.9, lane_std=0.1, path_
 
 
 def _update(controller, model, *, offset=0.0, authority=0.0, enabled=True, active=True, valid=True, speed=_V_EGO,
-            pause_on_signal=False, turn_signal_active=False, highspeed_gain=_MAX_GAIN):
-  # ⚠ highspeed_gain の既定をここで **standard (_MAX_GAIN)** に固定しているのは意図的。
-  #   出荷時の既定は x2.0 (user 09-16) だが、**上流 (StarPilot) の挙動を固定しているテストは
-  #   高速スケジュールの影響を受けてはいけない**。強くした側を見たいテストだけ値を渡す。
+            pause_on_signal=False, turn_signal_active=False, highspeed_gain=_MAX_GAIN, midspeed_gain=_MAX_GAIN,
+            one_line=False):
+  # ⚠ highspeed_gain / midspeed_gain の既定をここで **standard (_MAX_GAIN)**、one_line を **OFF** に固定しているのは意図的。
+  #   出荷時の既定は x2.0 / x1.5 / ON だが、**上流 (StarPilot) の挙動を固定しているテストは
+  #   GS のスケジュールや片側補完の影響を受けてはいけない**。GS 側を見たいテストだけ値を渡す。
   controller.enabled = enabled
   controller.offset = offset
   controller.e2e_authority = authority
   controller.pause_on_signal = pause_on_signal
   controller.highspeed_gain = highspeed_gain
+  controller.midspeed_gain = midspeed_gain
+  controller.one_line = one_line
   lane_change = model.meta.laneChangeState != 0
   return controller.update(0.0, model, speed, active, valid, lane_change, turn_signal_active)
 
@@ -657,3 +660,195 @@ def test_shipped_default_strengthens_high_speed_only():
   assert _authority_scale_for(25.0, hs) == pytest.approx(0.0)   # 高速では譲らない
   assert _authority_scale_for(12.5, hs) == pytest.approx(1.0)   # 45km/h では従来どおり譲る
 
+
+
+# ── 中速スケジュール (10-10 追加) ─────────────────────────────────────────
+
+def test_midspeed_standard_is_a_noop():
+  """standard (0.30) なら中速スケジュールは 1 bit も効かないこと = 従来の挙動へ戻せる退避先。"""
+  for v in (2.5, 8.0, 10.0, 12.5, 15.0, 17.0, 19.5, 22.0, 30.0):
+    for hs in (_MAX_GAIN, 0.60, _MAX_HIGHSPEED_GAIN):
+      assert _gain_for(v, hs, _MAX_GAIN) == pytest.approx(_gain_for(v, hs))
+      assert _deadband_for(v, hs, _MAX_GAIN) == pytest.approx(_deadband_for(v, hs))
+
+
+@pytest.mark.parametrize("mid,gain,deadband", [(0.45, 0.45, 0.07), (0.60, 0.60, 0.06)])
+def test_midspeed_sets_the_45_to_61kmh_band(mid, gain, deadband):
+  """45-61km/h の gain / 不感帯が設定どおりになり、29km/h 以下 (低速スケジュール) は変わらないこと。"""
+  for v in (12.5, 15.0, 17.0):
+    assert _gain_for(v, _MAX_GAIN, mid) == pytest.approx(gain)
+    assert _deadband_for(v, _MAX_GAIN, mid) == pytest.approx(deadband)
+  for v in (2.5, 5.0, 8.0):
+    assert _gain_for(v, _MAX_GAIN, mid) == pytest.approx(_gain_for(v))
+    assert _deadband_for(v, _MAX_GAIN, mid) == pytest.approx(_deadband_for(v))
+
+
+def test_midspeed_hands_over_to_the_highspeed_setting():
+  """61→79km/h で中速の値から高速の値へ線形に移ること (高速 standard なら下りる向きでも良い)。"""
+  assert _gain_for(19.5, 0.60, 0.45) == pytest.approx(0.525)
+  assert _gain_for(22.0, 0.60, 0.45) == pytest.approx(0.60)
+  assert _gain_for(22.0, _MAX_GAIN, 0.45) == pytest.approx(_MAX_GAIN)   # 高速 standard = 79km/h 以上は従来値
+
+
+def test_midspeed_keeps_yielding_to_the_model():
+  """中速を強くしても authority (譲る) は外さない = 0.5m の回避では補正 0 のまま (高速と違い回避が本物の帯)。"""
+  for v in (12.5, 15.0, 17.0):
+    assert _authority_scale_for(v, 0.60) == pytest.approx(1.0)
+  _, avoid = _converge(_model(left=-1.3, right=2.3, path_std=0.1), authority=1.0, speed=15.0, midspeed_gain=_MAX_MIDSPEED_GAIN)
+  assert abs(avoid) < 1e-9
+
+
+def test_midspeed_scales_the_lat_accel():
+  """実効 la = 0.6 × (gain / 0.30) × (|err| - 不感帯)。x1.5 で 0.9 × (0.3 - 0.07)。"""
+  speed = 15.0
+  _, steady = _converge(_model(left=-1.5, right=2.1, path_std=0.6), speed=speed, midspeed_gain=0.45)
+  assert np.isclose(steady * speed ** 2, 0.9 * (0.3 - 0.07), rtol=1e-3)
+
+
+def test_midspeed_default_is_the_trial_value():
+  """出荷時の既定は x1.5 (様子見、user 10-10)。controller まで届いていること。"""
+  assert lcp.DEFAULTS[lcp.KEY_MIDSPEED_GAIN] == pytest.approx(0.45)
+  assert lcp.DEFAULTS[lcp.KEY_MIDSPEED_GAIN] in lcp.MIDSPEED_GAIN_CHOICES
+  assert _MAX_GAIN in lcp.MIDSPEED_GAIN_CHOICES, 'standard (従来と同一) へ戻す選択肢が消えている'
+  assert max(lcp.MIDSPEED_GAIN_CHOICES) == pytest.approx(_MAX_MIDSPEED_GAIN)
+  labels = [lcp.highspeed_gain_label(v) for v in lcp.MIDSPEED_GAIN_CHOICES]
+  assert len(set(labels)) == len(labels)
+  assert LaneCenteringController().midspeed_gain == pytest.approx(0.45)
+
+
+# ── 片側補完と短い途切れの保持 (10-10 追加) ────────────────────────────────
+
+_ONE_SIDED_SPEED = 10.0   # 36km/h (カーブでアウト線を見失う帯)
+
+
+def _outer_lost(left=-1.5, right=1.5, model_y=0.0, outer_std=0.5, outer_prob=0.5, inner_std=0.1, path_std=0.6):
+  """右線 (アウト側) の std が跳ねている model。左線は安定。⚠ path_std 0.6 = authority を効かせない。"""
+  m = _model(left=left, right=right, model_y=model_y, path_std=path_std)
+  m.laneLineStds[1] = inner_std
+  m.laneLineStds[2] = outer_std
+  m.laneLineProbs[2] = outer_prob
+  return m
+
+
+def _settled(one_line=True, n=200):
+  """幅 3.0m・中心で慣らした controller (片側補完の基準が出来ている状態)。"""
+  c = LaneCenteringController()
+  _feed(c, _model(left=-1.5, right=1.5, path_std=0.6), n, speed=_ONE_SIDED_SPEED, one_line=one_line)
+  return c
+
+
+def test_one_sided_keeps_centering_when_the_outer_line_wobbles():
+  """アウト線の std が跳ねても、安定した線 + 基準幅で中心を出して補正を続けること。"""
+  c = _settled()
+  # 車が 0.3m 左へ寄った (左線 -1.2 / 右線は見えているがぶれている) → 右へ戻す = 正
+  out = _feed(c, _outer_lost(left=-1.2, right=1.8), 300, speed=_ONE_SIDED_SPEED, one_line=True)
+  assert out > 0.0
+  assert c._status == 'one_sided'
+
+
+def test_one_sided_is_half_strength_with_wider_deadband():
+  """様子見の値: gain は通常の 0.5 倍、不感帯は +0.04m (誤差 0.2m = 曲率上限に当たらない大きさで測る)。"""
+  speed = _ONE_SIDED_SPEED
+  both = LaneCenteringController()
+  _feed(both, _model(left=-1.5, right=1.5, path_std=0.6), 200, speed=speed)
+  full = _feed(both, _model(left=-1.3, right=1.7, path_std=0.6), 600, speed=speed)
+  c = _settled()
+  half = _feed(c, _outer_lost(left=-1.3, right=1.7), 600, speed=speed, one_line=True)
+  db = _deadband_for(speed)
+  lookahead = max(speed, _lookahead_min_for(speed))
+  expect_full = 2.0 * (0.2 - db) / lookahead ** 2 * _gain_for(speed)
+  expect_half = 2.0 * (0.2 - db - 0.04) / lookahead ** 2 * _gain_for(speed) * 0.5
+  assert np.isclose(full, expect_full, rtol=1e-2)
+  assert np.isclose(half, expect_half, rtol=1e-2)
+
+
+def test_one_sided_off_is_upstream_behavior():
+  """OFF なら従来どおり: アウト線が門から落ちたら補正は 0 へ抜ける。"""
+  c = _settled(one_line=False)
+  out = _feed(c, _outer_lost(left=-1.2, right=1.8), 300, speed=_ONE_SIDED_SPEED, one_line=False)
+  assert abs(out) < 1e-6
+
+
+def test_one_sided_does_not_time_out():
+  """時間上限を持たない (user 10-10「途中で抜けるより補い続けた方が分かりやすい」)。30 秒続けても効いている。"""
+  c = _settled()
+  out = _feed(c, _outer_lost(left=-1.2, right=1.8), 3000, speed=_ONE_SIDED_SPEED, one_line=True)
+  assert out > 0.0
+  assert c._status == 'one_sided'
+
+
+def test_one_sided_needs_a_fresh_reference_to_start():
+  """補い始めは、確かな幅が直近 3 秒以内にあるときだけ。古い基準幅で始めない。"""
+  c = _settled()
+  both_lost = _model(left=-1.2, right=1.8, lane_prob=0.2, path_std=0.6)
+  _feed(c, both_lost, 400, speed=_ONE_SIDED_SPEED, one_line=True)    # 4 秒、両側とも見えない
+  out = _feed(c, _outer_lost(left=-1.2, right=1.8), 100, speed=_ONE_SIDED_SPEED, one_line=True)
+  assert out == 0.0
+  assert c._status == 'lost'
+
+
+def test_one_sided_needs_a_reference_at_all():
+  """一度も両側が揃っていない (基準幅が無い) なら補わない。"""
+  c = LaneCenteringController()
+  out = _feed(c, _outer_lost(left=-1.2, right=1.8), 300, speed=_ONE_SIDED_SPEED, one_line=True)
+  assert out == 0.0
+
+
+def test_one_sided_requires_a_steadier_line_than_the_normal_gate():
+  """頼る 1 本は std <= 0.2 (通常の門 0.3 より厳しい)。0.25 なら補わない。"""
+  c = _settled()
+  out = _feed(c, _outer_lost(left=-1.2, right=1.8, inner_std=0.25), 300, speed=_ONE_SIDED_SPEED, one_line=True)
+  assert abs(out) < 1e-6
+
+
+def test_one_sided_exits_on_a_jump_of_the_trusted_line():
+  """頼っている線が計画経路から急に離れたら (イン側に右折レーンが開いた等) 構造変化として抜ける。"""
+  c = _settled()
+  _feed(c, _outer_lost(left=-1.5, right=1.5), 100, speed=_ONE_SIDED_SPEED, one_line=True)
+  assert c._status == 'one_sided'
+  _update(c, _outer_lost(left=-2.2, right=1.5), speed=_ONE_SIDED_SPEED, one_line=True)   # 左線が 0.7m 逃げた
+  assert c._status == 'structural'
+  out = _feed(c, _outer_lost(left=-2.2, right=1.5), 50, speed=_ONE_SIDED_SPEED, one_line=True)
+  assert abs(out) < 1e-6
+
+
+def test_one_sided_follows_a_slowly_changing_width_with_the_noisy_line():
+  """基準幅は、ぶれているアウト線で std に応じてゆっくり直す (std 0.2 → 時定数 4s / 0.5 → 25s / 0.7 は使わない)。"""
+  c = _settled()
+  assert c._width_ref == pytest.approx(3.0, abs=0.01)
+  _feed(c, _outer_lost(left=-1.5, right=1.8, outer_std=0.25, outer_prob=0.5), 400, speed=_ONE_SIDED_SPEED, one_line=True)
+  assert 3.1 < c._width_ref < 3.3
+  c2 = _settled()
+  _feed(c2, _outer_lost(left=-1.5, right=1.8, outer_std=0.5, outer_prob=0.5), 400, speed=_ONE_SIDED_SPEED, one_line=True)
+  assert 3.0 < c2._width_ref < 3.06
+  c3 = _settled()
+  _feed(c3, _outer_lost(left=-1.5, right=1.8, outer_std=0.7, outer_prob=0.5), 400, speed=_ONE_SIDED_SPEED, one_line=True)
+  assert c3._width_ref == pytest.approx(3.0, abs=1e-6)
+
+
+def test_short_line_loss_holds_the_correction():
+  """線の確からしさで門から落ちた直後 0.3s は補正を保持し、その後 0.2s で抜く。"""
+  model = _model(left=-1.5, right=2.1)
+  c = LaneCenteringController()
+  out = _feed(c, model, 300, one_line=True)
+  assert out > 0.0
+  unsure = _model(left=-1.5, right=2.1, lane_prob=0.2)
+  for _ in range(30):
+    assert _update(c, unsure, one_line=True) == pytest.approx(out)
+  assert 0.0 < _update(c, unsure, one_line=True) < out
+  assert abs(_feed(c, unsure, 300, one_line=True)) < 1e-6
+
+
+def test_structural_change_is_not_held():
+  """幅の急変 (構造変化) は保持せず、今までどおり即抜く。"""
+  c = LaneCenteringController()
+  out = _feed(c, _model(left=-1.5, right=2.1, path_std=0.6), 300, one_line=True)
+  assert out > 0.0
+  jumped = _model(left=-1.5, right=2.9, path_std=0.6)    # 幅 3.6 → 4.4m
+  assert _update(c, jumped, one_line=True) < out
+  assert c._status == 'structural'
+
+
+def test_one_line_default_is_on():
+  assert lcp.DEFAULTS[lcp.KEY_ONE_LINE] is True
+  assert LaneCenteringController().one_line is True

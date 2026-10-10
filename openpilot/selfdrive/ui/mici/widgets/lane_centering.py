@@ -1,6 +1,6 @@
 """Lane Centering の設定ウィジェット (mici)。
 
-⚠⚠ **なぜ `BigParamControl` をそのまま使えないのか**: あれは `Params` 直叩きだが、この 4 つは
+⚠⚠ **なぜ `BigParamControl` をそのまま使えないのか**: あれは `Params` 直叩きだが、LC の設定は
 **openpilot の Params に置いていない** (理由 = `lane_centering_params` のモジュール docstring)。
 読み書きは `lane_centering_params` が持っているので、そこを経由する版をここに置く。
 
