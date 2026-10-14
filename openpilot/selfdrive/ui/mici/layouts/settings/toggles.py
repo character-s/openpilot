@@ -3,7 +3,8 @@ from collections.abc import Callable
 from openpilot.cereal import log
 
 from openpilot.system.ui.widgets.scroller import NavScroller
-from openpilot.selfdrive.ui.mici.widgets.button import BigParamControl, BigMultiParamToggle, BigToggle, GreyBigButton
+from openpilot.selfdrive.ui.mici.widgets.button import BigParamControl, BigToggle, GreyBigButton
+from openpilot.selfdrive.ui.mici.widgets.personality import PersonalityToggle
 from openpilot.selfdrive.ui.mici.widgets.lane_centering import LaneCenteringChoice, LaneCenteringToggle
 from openpilot.selfdrive.ui.mici.widgets.dialog import BigConfirmationCircleButton
 from openpilot.system.ui.lib.application import gui_app
@@ -43,14 +44,13 @@ class TogglesLayoutMici(NavScroller):
   def __init__(self):
     super().__init__()
 
-    # GS450h: 4 段目 "more aggressive" (enum moreAggressive @3、1.0s)。⚠ 並びは enum の番号順 (index = 保存値) なので末尾に置く。
-    self._personality_toggle = BigMultiParamToggle("driving personality", "LongitudinalPersonality",
-                                                   ["aggressive", "standard", "relaxed", "more aggressive"],
-                                                   description="Standard is recommended.\n" +
-                                                               "Aggressive follows closer, with firmer gas and braking.\n" +
-                                                               "More aggressive follows closer still (1.0 s).\n" +
-                                                               "Relaxed leaves more space.\n" +
-                                                               "Use the steering wheel distance button on supported cars.")
+    # GS450h: 4 段目 "more aggressive" (enum moreAggressive @3、1.0s)。表示の並びと保存値の対応は widgets/personality.py。
+    self._personality_toggle = PersonalityToggle("driving personality", "LongitudinalPersonality",
+                                                 description="Standard is recommended.\n" +
+                                                             "Aggressive follows closer, with firmer gas and braking.\n" +
+                                                             "More aggressive follows closer still (1.0 s).\n" +
+                                                             "Relaxed leaves more space.\n" +
+                                                             "Use the steering wheel distance button on supported cars.")
     self._experimental_btn = BigToggle("experimental mode", description_icon=gui_app.texture("icons_mici/experimental_mode.png", 64, 64),
                                        initial_state=ui_state.params.get_bool("ExperimentalMode"), toggle_callback=self._on_experimental_mode,
                                        description="Let the driving model control gas and brakes.\n" +
@@ -143,7 +143,7 @@ class TogglesLayoutMici(NavScroller):
     if ui_state.sm.updated["selfdriveState"]:
       personality = PERSONALITY_TO_INT[ui_state.sm["selfdriveState"].personality]
       if personality != ui_state.personality and ui_state.started:
-        self._personality_toggle.set_value(self._personality_toggle._options[personality])
+        self._personality_toggle.set_personality(personality)
       ui_state.personality = personality
 
   def show_event(self):

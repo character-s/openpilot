@@ -51,6 +51,7 @@ LC_PARAMS_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/lane_centering_param
 DEC_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/dec/dec.py'
 MICI_MODELS_PY = 'openpilot/selfdrive/ui/sunnypilot/mici/layouts/models.py'
 MICI_TOGGLES_PY = 'openpilot/selfdrive/ui/mici/layouts/settings/toggles.py'
+MICI_PERSONALITY_PY = 'openpilot/selfdrive/ui/mici/widgets/personality.py'
 PARAMS_KEYS_H = 'openpilot/common/params_keys.h'
 PANDAD_CC = 'openpilot/selfdrive/pandad/pandad.cc'
 SPI_CC = 'openpilot/selfdrive/pandad/spi.cc'
@@ -359,7 +360,12 @@ def test_more_aggressive_personality_survives():
   assert mpc.count('LongitudinalPersonality.moreAggressive') == 2, 'get_jerk_factor / get_T_FOLLOW の両方に要る'
   assert 'self.params[:,4] = t_follow' in mpc, 't_follow が実行時パラメータで渡っていない = コンパイル済み C を作り直さないと効かない'
   assert '% len(LONGITUDINAL_PERSONALITY_MAP)' in _read(SELFDRIVED_PY), '車間ボタンの循環が 3 段のまま = moreAggressive に回らない'
-  assert '"more aggressive"]' in _read(MICI_TOGGLES_PY), '設定画面に 4 段目が無い (index = enum 番号なので末尾)'
+  # 10-15: 設定画面は専用ウィジェット。表示は上から車間の短い順、保存値は enum 番号 (表示 index とは別)
+  assert 'PersonalityToggle("driving personality", "LongitudinalPersonality"' in _read(MICI_TOGGLES_PY), \
+    '専用ウィジェットでない (BigMultiParamToggle は 4 個目の pill が下端に食い込む)'
+  assert 'set_personality(personality)' in _read(MICI_TOGGLES_PY), '車間ボタンで変えたときに画面が追従しない'
+  assert _literal(MICI_PERSONALITY_PY, 'PERSONALITY_LABELS') == ("more aggressive", "aggressive", "standard", "relaxed")
+  assert _literal(MICI_PERSONALITY_PY, 'PERSONALITY_VALUES') == (3, 0, 1, 2), '表示と保存値 (enum 番号) の対応が崩れた'
   # 10-10: more aggressive だけ巡航の加速上限 1.25 倍 (前車に離される量の 34% がこの上限張り付きだった)
   planner = _read(LONG_PLANNER_PY)
   assert _literal(LONG_PLANNER_PY, 'MORE_AGGRESSIVE_ACCEL_SCALE') == 1.25
