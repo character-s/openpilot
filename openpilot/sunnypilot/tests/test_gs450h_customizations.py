@@ -326,7 +326,7 @@ def test_pln1_5_stop_threshold_survives():
 
 
 def test_stopping_ramp_rates_survive():
-  """stopping 状態でブレーキを詰める速度。standstill だけ GS 独自 (5.0)、走行中は上流と同じ 1.0。
+  """stopping 状態でブレーキを詰める速度。standstill は GS 独自 (5.0)、走行中は 0.3 (10-19、user「毎回カックンしなくてよい」)。
 
   ⚠ 上流はここを `output_accel -= 1.0 * DT_CTRL` の 1 行で書くので、追従のたびに
   standstill 分岐ごと消えやすい。消えるとホールド力が育たずクリープで動く (2026-07-07 の症状)。
@@ -335,9 +335,11 @@ def test_stopping_ramp_rates_survive():
   """
   src = _read(LONGCONTROL_PY)
   m = re.search(r'decel_rate\s*=\s*([0-9.]+)\s+if\s+CS\.standstill\s+else\s+([0-9.]+)', src)
-  assert m, 'longcontrol.py の stopping ランプが「standstill なら 5.0 / それ以外 1.0」の形でない'
+  # 10-19: 走行中は 1.0 -> 0.3。モデルが手前で十分な距離を取るようになったので、停止距離を稼ぐ 1.0 は不要
+  # (止まる瞬間の指令が -0.96 まで深まるのがカックンの正体)。7 route / 54 停止で中央値 +3cm / +0.2s
+  assert m, 'longcontrol.py の stopping ランプが「standstill なら 5.0 / それ以外 X」の形でない'
   assert float(m.group(1)) == 5.0, f'standstill のホールド詰めが {m.group(1)} (GS は 5.0)'
-  assert float(m.group(2)) == 1.0, f'走行中の詰めが {m.group(2)} (上流と同じ 1.0 が現行)'
+  assert float(m.group(2)) == 0.3, f'走行中の詰めが {m.group(2)} (10-19 から 0.3)'
 
 
 def test_stop_distance_matches_compiled_cost():
