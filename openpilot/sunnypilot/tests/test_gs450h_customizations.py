@@ -385,9 +385,26 @@ def test_more_aggressive_personality_survives():
   assert 'set_personality(personality)' in _read(MICI_TOGGLES_PY), '車間ボタンで変えたときに画面が追従しない'
   assert _literal(MICI_PERSONALITY_PY, 'PERSONALITY_LABELS') == ("more aggressive", "aggressive", "standard", "relaxed")
   assert _literal(MICI_PERSONALITY_PY, 'PERSONALITY_VALUES') == (3, 0, 1, 2), '表示と保存値 (enum 番号) の対応が崩れた'
-  # 10-10 の「more aggressive だけ巡航の加速上限 1.25 倍」は 10-19 追従で外した: upstream #39097 で
-  # 巡航候補の上限が全 personality で ACCEL_MAX になり、1.25 倍しても min(.., ACCEL_MAX) で同じになるため。
-  assert 'MORE_AGGRESSIVE_ACCEL_SCALE' not in _read(LONG_PLANNER_PY)
+  # 10-10: more aggressive だけ巡航の加速上限 1.25 倍。10-19 追従で一度外したが、PLN-9 で旧版テーブルごと戻した
+  assert _literal(LONG_PLANNER_PY, 'MORE_AGGRESSIVE_ACCEL_SCALE') == 1.25
+  assert 'personality == log.LongitudinalPersonality.moreAggressive' in _read(LONG_PLANNER_PY)
+
+
+def test_pln9_e2e_only_caps_when_decelerating():
+  """PLN-9 (10-19 user 判断「B」): e2e は減速・停止したい場面だけ min の候補。加速は旧版テーブルの巡航候補で決める。
+
+  上流 0.11.3 (Autospeed) は e2e を常に候補に入れるので、lead なし加速がモデル任せになる
+  (route 0f6: 36-54km/h で設定速度まで 17km/h あっても aTarget p50 0.09)。⚠ 低速 (<18km/h) は e2e を常に残す
+  = 外すと lead なしの赤信号で巡航候補が加速を出す。⚠ モデルを替えたら見直す。
+  """
+  src = _read(LONG_PLANNER_PY)
+  assert _literal(LONG_PLANNER_PY, 'A_CRUISE_MAX_VALS') == [1.6, 1.2, 0.8, 0.6], '巡航候補の上限が旧版テーブルでない'
+  assert _literal(LONG_PLANNER_PY, 'E2E_ALWAYS_BELOW_V') <= 5.0, '低速で e2e を外すと lead なしの赤信号で加速しうる'
+  assert 'def e2e_wants_decel(' in src, 'e2e を減速時だけ候補にする判定が落ちた = 上流どおり常に e2e が加速を抑える'
+  assert re.search(r'if use_e2e:\s*\n\s*candidates\.append\(\(output_a_target_e2e', src), \
+    'e2e を条件付きで候補に足す形が崩れた'
+  assert 'or e2e_should_stop or' in src, 'e2e の止まれ判定で候補に入れる条件が落ちた (停止に必須)'
+  assert "sm['controlsState'].curvature" in src, 'カーブ中の総加速度制限 (旧版) が落ちた'
 
 
 def test_pln1_7_extra_stop_distance_survives():
