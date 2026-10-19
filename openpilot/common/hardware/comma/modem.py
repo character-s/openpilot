@@ -18,6 +18,8 @@ from ipaddress import IPv4Address, AddressValueError
 
 from enum import Enum
 
+from openpilot.common.esim.base import WEBBING_ICCID_PREFIX
+
 # GS450h: manager の子プロセスの stdout はどこにも残らないので、SIM が読めなくなった経緯を
 # 後から追えない (09-15 に 2 回踏んで、どちらも状態ファイルが凍結していることでしか気付けなかった)。
 # /data にも吐いて ssh 1 回で読めるようにする。⚠ /data の空きは多くないので 256KB x 2 世代に抑える。
@@ -58,7 +60,6 @@ NETWORK_TYPE = {0: "gsm", 1: "gsm", 3: "gsm", 8: "gsm",
                 11: "nr", 12: "nr", 13: "nr"}
 
 DIAL_CID = 1
-WEBBING_ICCID_PREFIX = "8985235"
 
 PPPD_CMD = [
   "sudo", "pppd", PPP_PORT, "460800", "noauth", "nodetach", "noipdefault", "usepeerdns",

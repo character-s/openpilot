@@ -83,7 +83,7 @@ class LongControl:
     self.go_timer = 0.0 if should_stop else min(self.go_timer + DT_CTRL, 10.0)
     self.lead_timer = min(self.lead_timer + DT_CTRL, 10.0) if has_lead else 0.0
 
-    # PLN-3: refresh the model gate at 1Hz (same cadence dec.py reads its param at). The big
+    # PLN-3: refresh the model gate at 1Hz (same 1Hz cadence the param readers use). The big
     # model takes ~80s to load, so this flips mid-drive - reading it once at init would miss it.
     self._frame += 1
     if self._frame % int(1. / DT_CTRL) == 0:

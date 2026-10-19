@@ -48,7 +48,6 @@ FETCHER_PY = 'openpilot/sunnypilot/models/fetcher.py'
 SCC_MAP_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/smart_cruise_control/map_controller.py'
 LC_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/lane_centering.py'
 LC_PARAMS_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/lane_centering_params.py'
-DEC_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/dec/dec.py'
 MICI_MODELS_PY = 'openpilot/selfdrive/ui/sunnypilot/mici/layouts/models.py'
 MICI_TOGGLES_PY = 'openpilot/selfdrive/ui/mici/layouts/settings/toggles.py'
 MICI_PERSONALITY_PY = 'openpilot/selfdrive/ui/mici/widgets/personality.py'
@@ -361,17 +360,15 @@ def test_more_aggressive_personality_survives():
   assert 'self.params[:,4] = t_follow' in mpc, 't_follow が実行時パラメータで渡っていない = コンパイル済み C を作り直さないと効かない'
   assert '% len(LONGITUDINAL_PERSONALITY_MAP)' in _read(SELFDRIVED_PY), '車間ボタンの循環が 3 段のまま = moreAggressive に回らない'
   # 10-15: 設定画面は専用ウィジェット。表示は上から車間の短い順、保存値は enum 番号 (表示 index とは別)
-  assert 'PersonalityToggle("driving personality", "LongitudinalPersonality"' in _read(MICI_TOGGLES_PY), \
+  # 10-19: upstream #39100 に合わせて名前は "following distance"
+  assert 'PersonalityToggle("following distance", "LongitudinalPersonality"' in _read(MICI_TOGGLES_PY), \
     '専用ウィジェットでない (BigMultiParamToggle は 4 個目の pill が下端に食い込む)'
   assert 'set_personality(personality)' in _read(MICI_TOGGLES_PY), '車間ボタンで変えたときに画面が追従しない'
   assert _literal(MICI_PERSONALITY_PY, 'PERSONALITY_LABELS') == ("more aggressive", "aggressive", "standard", "relaxed")
   assert _literal(MICI_PERSONALITY_PY, 'PERSONALITY_VALUES') == (3, 0, 1, 2), '表示と保存値 (enum 番号) の対応が崩れた'
-  # 10-10: more aggressive だけ巡航の加速上限 1.25 倍 (前車に離される量の 34% がこの上限張り付きだった)
-  planner = _read(LONG_PLANNER_PY)
-  assert _literal(LONG_PLANNER_PY, 'MORE_AGGRESSIVE_ACCEL_SCALE') == 1.25
-  assert 'personality == log.LongitudinalPersonality.moreAggressive' in planner
-  assert "self.allow_throttle, sm['selfdriveState'].personality)" in planner, \
-    'get_cruise_accel に personality が渡っていない = 上限の引き上げが死んでいる'
+  # 10-10 の「more aggressive だけ巡航の加速上限 1.25 倍」は 10-19 追従で外した: upstream #39097 で
+  # 巡航候補の上限が全 personality で ACCEL_MAX になり、1.25 倍しても min(.., ACCEL_MAX) で同じになるため。
+  assert 'MORE_AGGRESSIVE_ACCEL_SCALE' not in _read(LONG_PLANNER_PY)
 
 
 def test_pln1_7_extra_stop_distance_survives():
@@ -646,10 +643,10 @@ def test_model_selector_shows_every_folder():
 
 
 def test_lane_centering_ui_is_wired_into_settings():
-  """設定画面の DEC の右に Lane Centering が並んでいること。"""
+  """設定画面に Lane Centering が並んでいること (10-19: DEC は upstream #2056 で廃止、トグルも外した)。"""
   src = _read(MICI_TOGGLES_PY)
   assert 'lane_centering' in src, 'mici の設定に Lane Centering が載っていない'
-  assert 'DynamicExperimentalControl' in src, 'DEC トグルが落ちている'
+  assert '*self._lane_centering_details' in src, 'Lane Centering の詳細設定が画面に並んでいない'
 
 
 # ===========================================================================
@@ -748,7 +745,6 @@ GS_TOUCHED_FILES = [
   'openpilot/selfdrive/ui/mici/widgets/lane_centering.py',
   'openpilot/selfdrive/controls/controlsd.py',
   'openpilot/selfdrive/controls/lib/latcontrol_torque.py',
-  DEC_PY,
   'openpilot/sunnypilot/selfdrive/controls/lib/latcontrol_torque_ext.py',
   PANDAD_CC, SPI_CC,
   # 09-03 追加
@@ -786,25 +782,6 @@ def test_pln1_6_creep_fade_keeps_braking_compensation():
   assert '_comp_frac' in body, 'creep 帯フェードが落ちている (07-15 の脈動対策)'
   assert re.search(r'actuators\.accel\s*<\s*-0\.2', body), \
       'PLN-1_6 の「明確に減速中なら補償を残す」門が落ちている'
-
-
-def test_dec_radar_mode_checks_slow_down_before_lead():
-  """DEC の `_radar_mode` は slow_down を lead より先に見ること (GS 450h 改造)。
-
-  上流の順 (lead が先) に戻ると、前車を検知した瞬間に e2e の視覚先読み減速が
-  planner の候補から丸ごと外れ、「set 速度のまま車列に近づいて急ブレーキ」が再発する。
-  停止直前も blended から外れ、その隙に MPC がクリープを足して前車へ詰める。
-  route 015 の実測 (前車ありの減速シーン 51 件、`archive/probes/_dec_mode_shadow.py`):
-    上流順 = blended 0.2% (16/7992) / この順 = 65.4% (5227/7992)
-    停止直前 = 上流順 0.0% → 停止後 82.6% (この切替の隙がクリープ詰め)
-  """
-  src = _read(DEC_PY)
-  body = src.split('def _radar_mode')[1].split('def update')[0]
-  i_dep = body.index('_lead_departing')
-  i_slow = body.index('self._has_slow_down')
-  i_lead = body.index('self._has_lead_filtered')
-  assert i_dep < i_slow, 'launch fix v3 が slow_down より後ろに落ちた = 発進のもたつきが再発する'
-  assert i_slow < i_lead, 'slow_down が lead より後ろ = 上流順に戻っている (先読み減速が消える)'
 
 
 def test_pandad_binary_carries_the_send_priority_patch():
@@ -1063,8 +1040,13 @@ def test_pln1_3_map_fix_freshness_stamp_survives():
   src = _read(OSM_MAP_DATA_PY)
   assert re.search(r'"valid":\s*bool\(self\.localizer_valid\)', src), 'valid 印が落ちている'
   assert re.search(r'"unixMillis":\s*int\(time\.time\(\)\s*\*\s*1e3\)', src), 'unixMillis 印が落ちている (壁時計で押すこと)'
-  assert re.search(r'data\.get\("unixMillis"\)', _read(SCC_MAP_PY)), \
-    'SCC-M 側が unixMillis を読んでいない = 印だけあって鮮度判定が効かない'
+  # 10-19: upstream が SCC-M の位置を gpsLocation(External) 直読みに変えたので、消費側の判定は
+  # gps_fix_ok (alive/valid/hasFix/(0,0)/受信 2 秒以内) に移した。⚠ 鮮度は monotonic の受信時刻で見る
+  scc = _read(SCC_MAP_PY)
+  fix_ok = scc.split('def gps_fix_ok')[1].split('\ndef ')[0]
+  for needed in ('sm.alive[service]', 'sm.valid[service]', 'gps.hasFix', 'sm.recv_time[service]', 'GPS_STALE_S'):
+    assert needed in fix_ok, f'SCC-M の GPS 判定から {needed} が落ちた = 古い/無効な位置で地図制御が動く'
+  assert 'if not gps_fix_ok(sm, self.gps_location_service):' in scc, 'update_calculations が GPS 判定を見ていない'
 
 
 def test_mici_update_hash_first_survives():

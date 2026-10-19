@@ -3,8 +3,10 @@ import math
 import platform
 import time
 
+import openpilot.cereal.messaging as messaging
 from openpilot.cereal import custom
 from openpilot.common.constants import CV
+from openpilot.common.gps import get_gps_location_service
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
@@ -39,38 +41,23 @@ GPS_STALE_S = 2.0
 V_TARGET_REJECT = 15 * CV.KPH_TO_MS
 
 
-def position_from_param(param: str, params: Params) -> tuple[Coordinate | None, bool]:
-  """Read LastGPSPosition and report whether it can be trusted.
+def gps_fix_ok(sm: messaging.SubMaster, service: str) -> bool:
+  """Whether the GPS fix in sm[service] can be trusted for map matching (PLN-1_3).
 
-  osm_map_data keeps rewriting the last known fix while the localizer is invalid, so a plain coordinate
-  read cannot tell a fresh fix from a cold start. It stamps "valid" and "unixMillis" (PLN-1_3); a payload
-  without them is treated as untrusted rather than assumed good.
+  10-19 upstream reads the position straight from gpsLocation(External) instead of mapd's
+  LastGPSPosition param; the same guards apply: alive/valid, an actual fix, not (0, 0), and fresh
+  (received within GPS_STALE_S).
   """
-  raw = params.get(param)
-  if not raw:
-    return None, False
-
-  try:
-    data = json.loads(raw)
-  except (ValueError, TypeError):
-    return None, False
-
-  lat, lon = data.get("latitude"), data.get("longitude")
-  if lat is None or lon is None:
-    return None, False
-
-  pos = Coordinate(float(lat), float(lon))
-  if abs(pos.latitude) < 1e-6 and abs(pos.longitude) < 1e-6:  # (0, 0) = never fixed
-    return None, False
-  if not data.get("valid", False):
-    return pos, False
-
-  ts = data.get("unixMillis")
-  # unixMillis は mapd が壁時計で付けた時刻なので、ここも壁時計で比べるのが正しい (osm_map_data.py と対)
-  if ts is None or (time.time() * 1e3 - float(ts)) > GPS_STALE_S * 1e3:  # noqa: TID251
-    return pos, False
-
-  return pos, True
+  if not (sm.alive[service] and sm.valid[service]):
+    return False
+  gps = sm[service]
+  if not gps.hasFix:
+    return False
+  if abs(gps.latitude) < 1e-6 and abs(gps.longitude) < 1e-6:  # (0, 0) = never fixed
+    return False
+  # ⚠ 鮮度は受信時刻 (monotonic) で見る。GPS の unixTimestampMillis と c4 の時計を比べると、時計が
+  #   ずれているだけで SCC-M が黙り続ける (上流の speed_limit_resolver は monotonic と unix を混ぜて引いている)
+  return (time.monotonic() - sm.recv_time[service]) <= GPS_STALE_S
 
 
 def velocities_from_param(param: str, params: Params):
@@ -129,7 +116,8 @@ class SmartCruiseControlMap:
     self.target_lon = 0.0
     self.frame = -1
 
-    self.last_position = position_from_param("LastGPSPosition", self.mem_params)[0] or Coordinate(0.0, 0.0)
+    self.gps_location_service = get_gps_location_service(self.params)
+    self.last_position = Coordinate(0.0, 0.0)
     self.target_velocities = velocities_from_param("MapTargetVelocities", self.mem_params) or []
 
   def get_v_target_from_control(self) -> float:
@@ -153,16 +141,15 @@ class SmartCruiseControlMap:
     self.target_lat = 0.0
     self.target_lon = 0.0
 
-  def update_calculations(self) -> None:
-    position, gps_ok = position_from_param("LastGPSPosition", self.mem_params)
-    self.last_position = position or Coordinate(0.0, 0.0)
+  def update_calculations(self, sm: messaging.SubMaster) -> None:
+    gps = sm[self.gps_location_service]
+    self.last_position = Coordinate(gps.latitude, gps.longitude)
 
-    if not gps_ok:
+    if not gps_fix_ok(sm, self.gps_location_service):
       # Stale, missing or never-fixed position: whatever mapd matched, it matched it somewhere
       # else. Silence map control entirely instead of steering off a guess.
       self.reset_target()
       return
-
     lat = self.last_position.latitude
     lon = self.last_position.longitude
 
@@ -311,7 +298,7 @@ class SmartCruiseControlMap:
 
     return enabled, active
 
-  def update(self, long_enabled: bool, long_override: bool, v_ego, a_ego, v_cruise) -> None:
+  def update(self, sm: messaging.SubMaster, long_enabled: bool, long_override: bool, v_ego, a_ego, v_cruise) -> None:
     self.long_enabled = long_enabled
     self.long_override = long_override
     self.v_ego = v_ego
@@ -319,7 +306,7 @@ class SmartCruiseControlMap:
     self.v_cruise = v_cruise
 
     self.update_params()
-    self.update_calculations()
+    self.update_calculations(sm)
 
     self.is_enabled, self.is_active = self._update_state_machine()
 

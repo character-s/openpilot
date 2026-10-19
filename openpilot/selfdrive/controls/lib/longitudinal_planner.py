@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-import math
 import numpy as np
 
 import openpilot.cereal.messaging as messaging
-from openpilot.cereal import log
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.modeld.constants import ModelConstants
+from openpilot.selfdrive.controls.lib.accel_boost import AccelBoost
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
@@ -18,28 +17,21 @@ from openpilot.common.swaglog import cloudlog
 
 from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
 
-A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
-A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 J_CRUISE_VALS = [1.6, 1.2, 0.8, 0.6]
-# GS450h (10-10): more aggressive だけ巡航の加速上限を 1.25 倍 (最終的には ACCEL_MAX 1.5 で頭打ち)。
-# 実測 (0b8-0c9): 目標より遠いのに前車に離された量の 34% がこの上限に張り付いていた (6 割は 30km/h 未満の発進)。
-# shadow (`_stop_mpc_sim.py` 流用) で、前車が加速したときの車間の遅れ 7-14% 減。⚠ ACC 側 (非 e2e) でだけ効く。
-MORE_AGGRESSIVE_ACCEL_SCALE = 1.25
+J_CRUISE_BP = [0., 10.0, 25., 40.]
 # PLN-5 (2026-09-06): 巡航の減速要求は摩擦ブレーキに入らない深さまでにする (user 判断)。
 # a_cruise = clip(v_cruise - v_ego, A_CRUISE_MIN, max_accel) は設定速度との差 (m/s) をそのまま
-# 加速度 (m/s^2) にするので、設定を 10km/h 下げただけで即 -1.2 が立つ。GS 450h の回生では出ない
+# 加速度 (m/s^2) にするので、-1.2 だと設定を 10km/h 下げただけで即 -1.2 が立つ。GS 450h の回生では出ない
 # 深さなので摩擦ブレーキが入り、後続から見てブレーキランプが点く。
 # 実測 (09-05 route 045 の 9 seg、archive/probes/_acc_brake_threshold.py):
 #   PCM_CRUISE(466) の ACC_BRAKING は aTarget が -0.5 より深い全帯で点灯率 1.000、-0.3 より浅いと
 #   0.03 以下。UN R13-H は 0.7 m/s^2 以下での制動灯点灯を禁止しているので -0.5 なら灯火には
 #   出ない見込み (⚠ 実車での目視確認は未実施。点いていたら -0.3 に落とす)。
-# ⚠ 本当に制動が要る場面 = 前車追従 (MPC 経路) と e2e はこの定数を通らないので影響しない。
+# ⚠ 本当に制動が要る場面 = 前車追従 (MPC 候補) と e2e 候補はこの定数を通らないので影響しない。
 #   下り坂の速度超過もここに含まれるが、user 判断で「ブレーキを踏むほどではない」= -0.5 のまま。
+# (10-19 追従: upstream も #39060 で同じ -0.5 にした)
 A_CRUISE_MIN = -0.5
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
-ALLOW_THROTTLE_THRESHOLD = 0.4
-MIN_ALLOW_THROTTLE_SPEED = 2.5
-
 # PLN-1_8 (2026-08-29): e2e の action ヘッドは -2.7 付近で飽和する。route 016 の信号停止では
 # 同じモデルの経路 (modelV2.acceleration) が -3.3 を描いているのに action は -2.67 止まりで、
 # 止まりきれずにドライバーがブレーキを踏んだ。経路が -3.0..-3.5 を描いた 51 フレームは
@@ -58,34 +50,10 @@ E2E_ACCEL_PATH_FLOOR = -3.0  # ここより深くはしない (ACCEL_MIN -3.5 �
 E2E_ACCEL_PATH_N = 9         # 経路の先頭 0.6s (ModelConstants.T_IDXS[8] = 0.625)
 E2E_ACCEL_PATH_RC = 0.15     # 経路 min の平滑 (modeld の LONG_SMOOTH_SECONDS と同じ桁)
 
-# Lookup table for turns
-_A_TOTAL_MAX_V = [1.7, 3.2]
-_A_TOTAL_MAX_BP = [20., 40.]
 
-def get_max_accel(v_ego):
-  return np.interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS)
-
-def get_coast_accel(pitch):
-  return np.sin(pitch) * -5.65 - 0.3  # fitted from data using xx/projects/allow_throttle/compute_coast_accel.py
-
-def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, accel_coast, allow_throttle,
-                     personality=log.LongitudinalPersonality.standard):
-  max_accel = ACCEL_MAX if e2e else get_max_accel(v_ego)
-  if not e2e and personality == log.LongitudinalPersonality.moreAggressive:   # GS450h
-    max_accel = min(max_accel * MORE_AGGRESSIVE_ACCEL_SCALE, ACCEL_MAX)
-
-  if not e2e:
-    a_total_max = np.interp(v_ego, _A_TOTAL_MAX_BP, _A_TOTAL_MAX_V)
-    a_y = v_ego ** 2 * angle_steers * CV.DEG_TO_RAD / (CP.steerRatio * CP.wheelbase)
-    a_x_allowed = math.sqrt(max(a_total_max ** 2 - a_y ** 2, 0.))
-    max_accel = min(max_accel, a_x_allowed)
-    if not allow_throttle:
-      clipped_accel_coast = max(accel_coast, ACCEL_MIN)
-      coast_limit = np.interp(v_ego, [MIN_ALLOW_THROTTLE_SPEED, MIN_ALLOW_THROTTLE_SPEED*2], [max_accel, clipped_accel_coast])
-      max_accel = min(max_accel, coast_limit)
-
-  target_accel = np.clip(v_cruise - v_ego, A_CRUISE_MIN, max_accel)
-  j_cruise = np.interp(v_ego, A_CRUISE_MAX_BP, J_CRUISE_VALS)
+def get_cruise_accel(v_cruise, v_ego, a_cruise_prev, dt):
+  target_accel = np.clip(v_cruise - v_ego, A_CRUISE_MIN, ACCEL_MAX)
+  j_cruise = np.interp(v_ego, J_CRUISE_BP, J_CRUISE_VALS)
   target_accel = float(np.clip(target_accel, a_cruise_prev - j_cruise * dt, a_cruise_prev + j_cruise * dt))
 
   return target_accel
@@ -98,7 +66,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     LongitudinalPlannerSP.__init__(self, self.CP, CP_SP, self.mpc)
     self.fcw = False
     self.dt = dt
-    self.allow_throttle = True
+    self.accel_boost = AccelBoost()
 
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
     self.e2e_path_accel = FirstOrderFilter(0.0, E2E_ACCEL_PATH_RC, self.dt)  # PLN-1_8
@@ -113,11 +81,6 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
   def update(self, sm):
     LongitudinalPlannerSP.update(self, sm)
 
-    if len(sm['carControl'].orientationNED) == 3:
-      accel_coast = get_coast_accel(sm['carControl'].orientationNED[1])
-    else:
-      accel_coast = ACCEL_MAX
-
     v_ego = sm['carState'].vEgo
     v_cruise_kph = min(sm['carState'].vCruise, V_CRUISE_MAX)
     v_cruise = v_cruise_kph * CV.KPH_TO_MS
@@ -131,12 +94,6 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # PCM cruise speed may be updated a few cycles later, check if initialized
     v_cruise_initialized = sm['carState'].vCruise != V_CRUISE_UNSET
     reset_state = reset_state or not v_cruise_initialized
-
-    throttle_probs = sm['modelV2'].meta.disengagePredictions.gasPressProbs
-    throttle_prob = throttle_probs[1] if len(throttle_probs) > 1 else 1.0
-    self.allow_throttle = throttle_prob > ALLOW_THROTTLE_THRESHOLD or v_ego <= MIN_ALLOW_THROTTLE_SPEED
-
-    steer_angle_without_offset = sm['carState'].steeringAngleDeg - sm['vehicleParameters'].angleOffsetDeg
 
     if reset_state:
       self.v_desired_filter.x = v_ego
@@ -153,7 +110,10 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     v_cruise, self.output_a_target = LongitudinalPlannerSP.update_targets(self, sm, self.v_desired_filter.x, self.output_a_target, v_cruise)
 
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
-    self.mpc.set_cur_state(self.v_desired_filter.x, self.output_a_target)
+    if self.CP.openpilotLongitudinalControl:
+      self.mpc.set_cur_state(self.v_desired_filter.x, self.output_a_target)
+    else:
+      self.mpc.set_cur_state(v_ego, sm['carState'].aEgo)
     self.mpc.update(sm['radarState'], personality=sm['selfdriveState'].personality)
 
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
@@ -179,6 +139,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # 回す (開いた瞬間に古い値を出さないため)。shouldStop はモデルの判断のまま触らない。
     # ⚠ capnp のリストは直接スライスしない。この repo の作法は np.array() 経由
     #   (sunnypilot/.../vision_controller.py と同じ)。
+    # ⚠ 10-19 追従: accel_boost より前に置く (boost は補正後の e2e 候補に乗る)。
     accel_path = sm['modelV2'].acceleration.x
     if len(accel_path) >= E2E_ACCEL_PATH_N:
       path_accel = float(np.min(np.array(accel_path)[:E2E_ACCEL_PATH_N]))
@@ -186,17 +147,14 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       if output_a_target_e2e < E2E_ACCEL_PATH_GATE:
         output_a_target_e2e = max(min(output_a_target_e2e, self.e2e_path_accel.x), E2E_ACCEL_PATH_FLOOR)
 
-    is_e2e = self.is_e2e(sm)
-
-    self.a_cruise = get_cruise_accel(is_e2e, v_cruise, v_ego,
-                                     self.a_cruise, steer_angle_without_offset, self.CP, self.dt,
-                                     accel_coast, self.allow_throttle, sm['selfdriveState'].personality)
+    self.a_cruise = get_cruise_accel(v_cruise, v_ego, self.a_cruise, self.dt)
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
+    output_a_target_e2e = self.accel_boost.update(sm, output_a_target_e2e, output_a_target_mpc, self.a_cruise)
+
     candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),
-                  (self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop)]
-    if is_e2e:
-      candidates.append((output_a_target_e2e, LongitudinalPlanSource.e2e, output_should_stop_e2e))
+                  (self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop),
+                  (output_a_target_e2e, LongitudinalPlanSource.e2e, output_should_stop_e2e)]
 
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
@@ -223,9 +181,9 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     longitudinalPlan.fcw = self.fcw
 
     longitudinalPlan.aTarget = float(self.output_a_target)
+    longitudinalPlan.accelBoost = float(self.accel_boost.total_boost)
     longitudinalPlan.shouldStop = bool(self.output_should_stop)
     longitudinalPlan.allowBrake = True
-    longitudinalPlan.allowThrottle = bool(self.allow_throttle)
 
     pm.send('longitudinalPlan', plan_send)
 
