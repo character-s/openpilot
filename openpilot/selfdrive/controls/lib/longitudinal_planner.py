@@ -69,6 +69,19 @@ E2E_SLOWDOWN_N = 21          # modelV2.velocity の先頭 ~4.4s (T_IDXS[20] = 3.
 E2E_SLOWDOWN_FRAC = 0.85     # 計画速度の最小がこれ x v_ego を下回る = モデルは減速するつもり
 E2E_GATE_HOLD = 1.0          # [s] 一度入れたら最低これだけ保持 (わずかな出入りで指令が跳ねないように)
 
+# GS450h PLN-10 (10-19, user 判断「L2 なので有効でよい」): lead なしの停止から自動で出ない = 青でも action ヘッドが
+# shouldStop / accel ~0 のまま (08-20 以降 big の lead なし停止 81 回中 34 回がドライバー発進)。同じモデルの計画速度が
+# 動いたら e2e の止まれを外す。持続の確認は longcontrol の PLN-3 (止まれが 1.5s 解け続けたら発進) に任せる。
+# 事前評価 (_launch_accel_probe.py --go-rules、08-20 以降 204 route / 81 停止、持続 1.5s、20Hz 判定):
+#   0.1 m/s = 早く出られる 57 / ⚠ 赤で許可 2 (0dc・0d8、fcam で赤を確認) / 救えない 22。user 10-19「偽陽性は許容する」で
+#   救える回数が最大の値。計画の最遠点位置 (GreenLightAlert と同じ 30m) で判定する案は 48 / 4 / 29 で劣る
+PLAN_GO_V = 0.1              # [m/s] modelV2.velocity の T_IDXS[15] (~2.2s 先) がこれを超えたら
+PLAN_GO_IDX = 15             # ⚠ 1 点は 20Hz で揺れ (route ed は 0.08-0.38)、1 フレーム割ると PLN-3 の 1.5s がリセットされる
+                             #   = ed は救えない。区間の最大 (1.0-3.9s 先) で見ると揺れは消えるが、赤のうちに遠い側が上がって
+                             #   赤の候補が 17-29 回に増える (20Hz 評価) ので不採用
+PLAN_GO_MAX_V = 3.0          # [m/s] ~11km/h 未満 (停止・発進直後) だけ
+PLAN_GO_ACCEL = 0.5          # [m/s^2] 発進の加速度の下限 (穏やかに)
+
 
 def get_max_accel(v_ego, personality=log.LongitudinalPersonality.standard):
   max_accel = float(np.interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS))
@@ -188,6 +201,13 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       self.e2e_path_accel.update(float(np.clip(path_accel, ACCEL_MIN, ACCEL_MAX)))
       if output_a_target_e2e < E2E_ACCEL_PATH_GATE:
         output_a_target_e2e = max(min(output_a_target_e2e, self.e2e_path_accel.x), E2E_ACCEL_PATH_FLOOR)
+
+    # PLN-10: lead なしの停止で、計画は動いたのに action が止まれのまま → e2e の止まれを外して穏やかに出す
+    plan_v = sm['modelV2'].velocity.x
+    if (v_ego < PLAN_GO_MAX_V and not sm['radarState'].leadOne.present and sm['modelV2'].big
+            and len(plan_v) > PLAN_GO_IDX and plan_v[PLAN_GO_IDX] > PLAN_GO_V):
+      output_should_stop_e2e = False
+      output_a_target_e2e = max(output_a_target_e2e, PLAN_GO_ACCEL)
 
     # PLN-9: e2e は減速・停止したい場面だけ min の候補にする (上流は常に候補)。判定は boost を足す前のモデルの値で
     if e2e_wants_decel(v_ego, output_a_target_e2e, output_should_stop_e2e, sm['modelV2'].velocity.x):

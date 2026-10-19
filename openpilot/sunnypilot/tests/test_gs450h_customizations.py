@@ -409,6 +409,21 @@ def test_pln9_e2e_only_caps_when_decelerating():
   assert "sm['controlsState'].curvature" in src, 'カーブ中の総加速度制限 (旧版) が落ちた'
 
 
+def test_pln10_plan_go_survives():
+  """PLN-10 (10-19): lead なしの停止で、計画速度が動いたら e2e の止まれを外す (action ヘッドが青でも止まれのまま)。
+
+  ⚠ 赤信号でも計画が跳ねることがある (0dc で 1.41 m/s) = 赤で出る可能性を承知で入れている (user「L2 なので有効でよい」
+  「偽陽性は許容する」)。閾値 0.1 m/s = 81 停止で早く出られる 57 / 赤で許可 2 / 救えない 22 (20Hz 評価)。
+  持続の確認は longcontrol の PLN-3 (lead なし big = 1.5s) に任せているので、そちらを下げると誤発進が増える。
+  """
+  src = _read(LONG_PLANNER_PY)
+  assert 0.0 < _literal(LONG_PLANNER_PY, 'PLAN_GO_V') <= 0.3, '計画速度の閾値が範囲外 (0.1 で ed が救える、0.3 超は効果が減る)'
+  assert _literal(LONG_PLANNER_PY, 'PLAN_GO_MAX_V') <= 3.0
+  assert "not sm['radarState'].leadOne.present and sm['modelV2'].big" in src, 'lead なし・big の条件が落ちた'
+  assert _literal(LONGCONTROL_PY, 'PLN3_GO_SUSTAIN_NOLEAD_BIG') >= 1.5, \
+    'PLN-10 の持続確認は PLN-3 の lead なし sustain に依存している (下げると赤での誤発進が増える)'
+
+
 def test_pln1_7_extra_stop_distance_survives():
   """PLN-1_7: 停止時だけ x_obstacle を手前に引いて前車への詰めすぎを直す。
 
