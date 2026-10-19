@@ -72,6 +72,8 @@ MICI_BUTTON_PY = 'openpilot/selfdrive/ui/mici/widgets/button.py'
 # ⚠ tinygrad 本体へのパッチ。上流が tinygrad を総入れ替えするたびに (09-02 に 1 回目) ここが競合する
 TG_SYSTEM_PY = 'tinygrad_repo/tinygrad/runtime/support/system.py'
 TG_USB_PY = 'tinygrad_repo/tinygrad/runtime/support/usb.py'
+# panda の safety 本体 (opendbc 共通部)。⚠ C なので **panda ファームを焼き直さないと実機に効かない**
+OPENDBC_SAFETY_H = 'opendbc_repo/opendbc/safety/safety.h'
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +274,23 @@ def test_dsu_cruise_rx_check_for_mads_survives():
   src = _read(SAFETY_H)
   assert 'toyota_lka_unsupported_dsu_rx_checks' in src and 'TOYOTA_DSU_CRUISE_ADDR_CHECK' in src, \
     'unsupported-DSU 用の DSU_CRUISE RX check が落ちている = MADS の横が engage しなくなる'
+
+
+def test_rx_check_honors_ignore_frequency_check():
+  """⚠⚠ 0x365 (DSU_CRUISE) は 5Hz なので、最低頻度 (10Hz) チェックの免除 `ignore_frequency_check` が効いていないと
+  rx_checks_invalid が立ちっぱなしになる → controls_allowed が立たず、main ON で即 controlsMismatch (TAKE CONTROL IMMEDIATELY)。
+
+  10-19 追従で踏んだ: 上流の safety.h リファクタが `frequency_invalid = frequency < 10U` に変わり免除を見なくなった
+  (宣言と toyota.h / chrysler / tesla の指定は残ったまま)。c4 の rlog では 0x365 を含む RX 対象 5 件とも健全なのに
+  pandaStates.safetyRxChecksInvalid が 100% True だった。
+  """
+  src = _read(OPENDBC_SAFETY_H)
+  m = re.search(r'bool frequency_invalid\s*=\s*(.*?);', src, re.DOTALL)
+  assert m, 'safety.h の最低頻度チェックの形が変わった。ignore_frequency_check の免除が残っているか手で読み直すこと'
+  assert 'ignore_frequency_check' in m.group(1), \
+    '最低頻度チェックが ignore_frequency_check を見ていない = 5Hz の DSU_CRUISE で RX 無効が立ちっぱなしになる'
+  assert re.search(r'0x365,[^\n]*\.frequency = 5U, \.ignore_frequency_check = true', _read(SAFETY_H)), \
+    'DSU_CRUISE (0x365) の RX check が 5Hz + 頻度免除でなくなった'
 
 
 def test_sdsu_engage_cancel_suppression_survives():
