@@ -62,8 +62,11 @@ A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 MORE_AGGRESSIVE_ACCEL_SCALE = 1.25         # more aggressive だけ 1.25 倍 (10-10、ACCEL_MAX で頭打ち)
 _A_TOTAL_MAX_V = [1.7, 3.2]                # カーブ中は横加速度と合わせた総加速度で抑える (旧版)
 _A_TOTAL_MAX_BP = [20., 40.]
-E2E_ALWAYS_BELOW_V = 5.0     # [m/s] 18km/h 未満は e2e を常に候補に残す (停止・発進は e2e の止まれ判定が要。外すと
-                             #   前車なしの赤信号で巡航候補が加速を出す)。0-18km/h は実測でも e2e が 0.66 出ていて鈍くない
+E2E_LOW_V = 5.0              # [m/s] 18km/h 未満は、計画が加速を描いていない限り e2e を候補に残す (停止・発進は e2e の止まれ
+                             #   判定が要。外すと前車なしの赤信号で巡航候補が加速を出す)
+E2E_LOW_GO_MARGIN = 0.3      # [m/s] PLN-11b: 計画速度 (T_IDXS[PLAN_GO_IDX] ~2.2s 先) が v_ego + これを超えたら低速でも e2e を外す。
+                             #   10-19 は 18km/h 未満で e2e を常に残していたため、発進後 ~25km/h まで (18km/h + 保持 1s)
+                             #   モデルの弱い加速が min を取っていた (user 10-20「25k あたりまでいくと強くなる」)
 E2E_DECEL_GATE = -0.3        # [m/s^2] e2e がこれより強く減速を求めたら候補に入れる
 E2E_SLOWDOWN_N = 21          # modelV2.velocity の先頭 ~4.4s (T_IDXS[20] = 3.9s, [21] = 4.3s)
 E2E_SLOWDOWN_FRAC = 0.85     # 計画速度の最小がこれ x v_ego を下回る = モデルは減速するつもり
@@ -82,6 +85,13 @@ PLAN_GO_IDX = 15             # ⚠ 1 点は 20Hz で揺れ (route ed は 0.08-0.
 PLAN_GO_MAX_V = 3.0          # [m/s] ~11km/h 未満 (停止・発進直後) だけ
 PLAN_GO_ACCEL = 0.5          # [m/s^2] 発進の加速度の下限 (穏やかに)
 
+# GS450h PLN-11c (10-20): lead なしで e2e が減速を出すときも、止まるつもりでなければ PLN-5 の A_CRUISE_MIN (-0.5、制動灯が
+# 点かない深さ) で止める。追従前は lead なしの減速が巡航候補だけだったので -0.5 で収まっていたが、PLN-9 で e2e の減速を
+# そのまま候補に入れたため、lead なしの自主減速が強くなった (user 10-20「前はブレーキランプがつかない -0.5 までに制限してた」)。
+# 例外 = 止まるつもり (action の止まれ / 計画速度が地平線内で E2E_STOP_PLAN_V を下回る = 信号・一時停止・飛び出し) と、
+# 急な減速 (PLN-1_8 の門 E2E_ACCEL_PATH_GATE より深い)。⚠ 遠い赤信号への接近は、計画が止まりを描くまで -0.5 で減速する
+E2E_STOP_PLAN_V = 1.0        # [m/s] modelV2.velocity (~10s 先まで) の最小がこれ未満 = モデルは止まるつもり
+
 
 def get_max_accel(v_ego, personality=log.LongitudinalPersonality.standard):
   max_accel = float(np.interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS))
@@ -90,13 +100,18 @@ def get_max_accel(v_ego, personality=log.LongitudinalPersonality.standard):
   return max_accel
 
 
-def get_cruise_accel(v_cruise, v_ego, a_cruise_prev, dt, personality=log.LongitudinalPersonality.standard, curvature=0.0):
+def get_cruise_target(v_cruise, v_ego, personality=log.LongitudinalPersonality.standard, curvature=0.0):
+  """巡航候補の目標 (ジャーク制限の前)。"""
   max_accel = get_max_accel(v_ego, personality)
   # カーブ中は総加速度 (前後 + 横) で抑える。横加速度は controlsState.curvature (舵角からオフセット補正済み) から
   a_total_max = np.interp(v_ego, _A_TOTAL_MAX_BP, _A_TOTAL_MAX_V)
   a_y = v_ego ** 2 * abs(curvature)
   max_accel = min(max_accel, float(np.sqrt(max(a_total_max ** 2 - a_y ** 2, 0.))))
-  target_accel = np.clip(v_cruise - v_ego, A_CRUISE_MIN, max_accel)
+  return float(np.clip(v_cruise - v_ego, A_CRUISE_MIN, max_accel))
+
+
+def get_cruise_accel(v_cruise, v_ego, a_cruise_prev, dt, personality=log.LongitudinalPersonality.standard, curvature=0.0):
+  target_accel = get_cruise_target(v_cruise, v_ego, personality, curvature)
   j_cruise = np.interp(v_ego, J_CRUISE_BP, J_CRUISE_VALS)
   target_accel = float(np.clip(target_accel, a_cruise_prev - j_cruise * dt, a_cruise_prev + j_cruise * dt))
 
@@ -105,8 +120,11 @@ def get_cruise_accel(v_cruise, v_ego, a_cruise_prev, dt, personality=log.Longitu
 
 def e2e_wants_decel(v_ego, e2e_accel, e2e_should_stop, plan_v):
   """PLN-9: e2e を min の候補に入れるか (= モデルが減速・停止したい場面か)。"""
-  if v_ego < E2E_ALWAYS_BELOW_V or e2e_should_stop or e2e_accel < E2E_DECEL_GATE:
+  if e2e_should_stop or e2e_accel < E2E_DECEL_GATE:
     return True
+  if v_ego < E2E_LOW_V:
+    # 低速: 計画が加速を描いているときだけ外す (止まれは上で拾う = 止まれが立っている間は外れない)
+    return not (len(plan_v) > PLAN_GO_IDX and plan_v[PLAN_GO_IDX] > v_ego + E2E_LOW_GO_MARGIN)
   if len(plan_v) >= E2E_SLOWDOWN_N:
     return float(np.min(np.array(plan_v)[:E2E_SLOWDOWN_N])) < E2E_SLOWDOWN_FRAC * v_ego
   return True  # 計画が読めないときは上流どおり (安全側)
@@ -209,6 +227,11 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       output_should_stop_e2e = False
       output_a_target_e2e = max(output_a_target_e2e, PLAN_GO_ACCEL)
 
+    # PLN-11c: lead なしで止まるつもりのない e2e 減速は -0.5 (制動灯が点かない深さ) まで
+    if (not sm['radarState'].leadOne.present and not output_should_stop_e2e and output_a_target_e2e > E2E_ACCEL_PATH_GATE
+            and len(plan_v) and float(np.min(np.array(plan_v))) > E2E_STOP_PLAN_V):
+      output_a_target_e2e = max(output_a_target_e2e, A_CRUISE_MIN)
+
     # PLN-9: e2e は減速・停止したい場面だけ min の候補にする (上流は常に候補)。判定は boost を足す前のモデルの値で
     if e2e_wants_decel(v_ego, output_a_target_e2e, output_should_stop_e2e, sm['modelV2'].velocity.x):
       self.e2e_gate_timer = E2E_GATE_HOLD
@@ -221,7 +244,12 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     a_cruise_prev = self.a_cruise if self.last_plan_source == LongitudinalPlanSource.cruise else min(self.a_cruise, a_prev)
     self.a_cruise = get_cruise_accel(v_cruise, v_ego, a_cruise_prev, self.dt,
                                      sm['selfdriveState'].personality, sm['controlsState'].curvature)
-    cruise_should_stop = should_stop(v_ego, self.a_cruise)
+    # PLN-11a: 止まれは立ち上げ前の目標で判定する。停止中は指令 (e2e の止まれ) から立ち上げるので self.a_cruise も
+    # 0.1 未満にいて、PLN-10 が止まれを外しても巡航候補が止まれを出し続け、PLN-3 の 1.5s の始まりが遅れていた
+    # (user 10-20「lead なし発車の反応が前より遅い」)。上流の巡航候補は停止中も上限にいるので止まれを出さない。
+    # forceDecel (v_cruise = 0) では目標が ~0 になり、今までどおり止まれを出す
+    cruise_should_stop = should_stop(v_ego, get_cruise_target(v_cruise, v_ego, sm['selfdriveState'].personality,
+                                                              sm['controlsState'].curvature))
 
     output_a_target_e2e = self.accel_boost.update(sm, output_a_target_e2e, output_a_target_mpc, self.a_cruise)
 

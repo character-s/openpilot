@@ -396,16 +396,16 @@ def test_pln9_e2e_only_caps_when_decelerating():
   """PLN-9 (10-19 user 判断「B」): e2e は減速・停止したい場面だけ min の候補。加速は旧版テーブルの巡航候補で決める。
 
   上流 0.11.3 (Autospeed) は e2e を常に候補に入れるので、lead なし加速がモデル任せになる
-  (route 0f6: 36-54km/h で設定速度まで 17km/h あっても aTarget p50 0.09)。⚠ 低速 (<18km/h) は e2e を常に残す
-  = 外すと lead なしの赤信号で巡航候補が加速を出す。⚠ モデルを替えたら見直す。
+  (route 0f6: 36-54km/h で設定速度まで 17km/h あっても aTarget p50 0.09)。⚠ 低速 (<18km/h) は計画が加速を描かない限り
+  e2e を残す (PLN-11b) = 外すと lead なしの赤信号で巡航候補が加速を出す。⚠ モデルを替えたら見直す。
   """
   src = _read(LONG_PLANNER_PY)
   assert _literal(LONG_PLANNER_PY, 'A_CRUISE_MAX_VALS') == [1.6, 1.2, 0.8, 0.6], '巡航候補の上限が旧版テーブルでない'
-  assert _literal(LONG_PLANNER_PY, 'E2E_ALWAYS_BELOW_V') <= 5.0, '低速で e2e を外すと lead なしの赤信号で加速しうる'
+  assert _literal(LONG_PLANNER_PY, 'E2E_LOW_V') <= 5.0, '低速で e2e を外すと lead なしの赤信号で加速しうる'
   assert 'def e2e_wants_decel(' in src, 'e2e を減速時だけ候補にする判定が落ちた = 上流どおり常に e2e が加速を抑える'
   assert re.search(r'if use_e2e:\s*\n\s*candidates\.append\(\(output_a_target_e2e', src), \
     'e2e を条件付きで候補に足す形が崩れた'
-  assert 'or e2e_should_stop or' in src, 'e2e の止まれ判定で候補に入れる条件が落ちた (停止に必須)'
+  assert 'if e2e_should_stop or e2e_accel < E2E_DECEL_GATE:' in src, 'e2e の止まれ判定で候補に入れる条件が落ちた (停止に必須)'
   assert "sm['controlsState'].curvature" in src, 'カーブ中の総加速度制限 (旧版) が落ちた'
 
 
@@ -422,6 +422,28 @@ def test_pln10_plan_go_survives():
   assert "not sm['radarState'].leadOne.present and sm['modelV2'].big" in src, 'lead なし・big の条件が落ちた'
   assert _literal(LONGCONTROL_PY, 'PLN3_GO_SUSTAIN_NOLEAD_BIG') >= 1.5, \
     'PLN-10 の持続確認は PLN-3 の lead なし sustain に依存している (下げると赤での誤発進が増える)'
+
+
+def test_pln11_launch_and_nolead_decel():
+  """PLN-11 (10-20 実走の指摘 3 点、いずれも PLN-9 の副作用)。
+
+  a: 巡航候補の止まれは立ち上げ前の目標で判定 (停止中の指令から立ち上げた値で判定すると発進が遅れる)
+  b: 低速でも計画が加速を描いたら e2e を外す (18km/h 未満で常に残すと ~25km/h までモデルの弱い加速になる)。
+     ⚠ 止まれが立っている間は外さない (赤で巡航候補が加速を出さないように)
+  c: lead なしで止まるつもりのない e2e 減速は A_CRUISE_MIN (-0.5、制動灯が点かない深さ) まで
+  """
+  src = _read(LONG_PLANNER_PY)
+  assert 'cruise_should_stop = should_stop(v_ego, get_cruise_target(' in src, 'PLN-11a: 立ち上げ後の値で止まれを判定している'
+  assert 'cruise_should_stop = should_stop(v_ego, self.a_cruise)' not in src
+  wants = src[src.index('def e2e_wants_decel('):src.index('class LongitudinalPlanner(')]
+  assert wants.index('e2e_should_stop') < wants.index('E2E_LOW_V'), 'PLN-11b: 低速の判定より先に止まれを拾わないと赤で外れる'
+  assert 0.0 < _literal(LONG_PLANNER_PY, 'E2E_LOW_GO_MARGIN') <= 0.5
+  assert _literal(LONG_PLANNER_PY, 'A_CRUISE_MIN') == -0.5
+  assert 'output_a_target_e2e = max(output_a_target_e2e, A_CRUISE_MIN)' in src, 'PLN-11c: lead なしの e2e 減速が -0.5 で止まらない'
+  assert 0.0 < _literal(LONG_PLANNER_PY, 'E2E_STOP_PLAN_V') <= 2.0
+  # c は PLN-10 の後 (発進の下限を上書きしない)、PLN-9 の門の前 (門は -0.5 に揃えた値で判定)
+  assert src.index('output_a_target_e2e = max(output_a_target_e2e, PLAN_GO_ACCEL)') < \
+         src.index('output_a_target_e2e = max(output_a_target_e2e, A_CRUISE_MIN)') < src.index('if e2e_wants_decel(')
 
 
 def test_tailscale_unit_restored_after_agnos_update():
