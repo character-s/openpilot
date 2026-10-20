@@ -28,6 +28,25 @@ function agnos_init {
       "$DIR/openpilot/common/hardware/comma/updater" "$AGNOS_PY" "$MANIFEST"
     done
   fi
+
+  gs_tailscale_restore &
+}
+
+# GS450h: AGNOS を上げると / のスロットごと入れ替わり、/etc/systemd/system/tailscaled.service が消える
+# (/data/tailscale のバイナリと state は残る)。消えると cellular で外から ssh できなくなる (08-25・09-04・10-19 の 3 回)。
+# 保全してある unit (.installed) と違えば入れ直す。AGNOS は / を ro でマウントしているので、その間だけ rw にする。
+# ⚠ /data/tailscale/systemd/tailscaled.service は配布物のオリジナルで別物 (/usr/sbin/tailscaled を指す) なので使わない
+function gs_tailscale_restore {
+  local SRC=/data/tailscale/tailscaled.service.installed
+  local DST=/etc/systemd/system/tailscaled.service
+  [ -f "$SRC" ] || return 0
+  cmp -s "$SRC" "$DST" && return 0
+  echo "gs_tailscale_restore: $DST を入れ直す"
+  sudo mount -o remount,rw /
+  sudo cp "$SRC" "$DST"
+  sudo mount -o remount,ro /
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now tailscaled
 }
 
 function launch {

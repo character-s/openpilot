@@ -424,6 +424,25 @@ def test_pln10_plan_go_survives():
     'PLN-10 の持続確認は PLN-3 の lead なし sustain に依存している (下げると赤での誤発進が増える)'
 
 
+def test_tailscale_unit_restored_after_agnos_update():
+  """AGNOS 更新で /etc の tailscaled unit が消える (08-25・09-04・10-19 の 3 回、10-19 は 19.7 -> 19.9)。
+
+  消えると cellular で外から ssh / rlog 回収ができない (c4 の LAN に入るまで直せない)。起動時に保全版 (.installed) と比べて入れ直す。
+  ⚠ 上流の追従で launch_chffrplus.sh が衝突したら、agnos_init からの呼び出しごと残すこと。
+  """
+  src = _read('launch_chffrplus.sh')
+  assert 'function gs_tailscale_restore' in src
+  agnos_init = src[src.index('function agnos_init'):src.index('function gs_tailscale_restore')]
+  assert 'gs_tailscale_restore &' in agnos_init, 'agnos_init から呼ばれていない (呼ばないと AGNOS 更新後に戻らない)'
+  assert agnos_init.index('AGNOS_VERSION') < agnos_init.index('gs_tailscale_restore &'), \
+    'AGNOS 更新 (reboot) の判定より後に呼ぶ (新スロットで起動してから入れ直す)'
+  body = src[src.index('function gs_tailscale_restore'):]
+  assert '/data/tailscale/tailscaled.service.installed' in body, '保全版 unit を使っていない'
+  assert '/data/tailscale/systemd/tailscaled.service' not in body, '配布物のオリジナル (/usr/sbin を指す別物) を使っている'
+  assert 'remount,rw /' in body and 'remount,ro /' in body, 'AGNOS の / は ro。rw にして cp し、ro に戻す'
+  assert 'systemctl enable --now tailscaled' in body
+
+
 def test_pln1_7_extra_stop_distance_survives():
   """PLN-1_7: 停止時だけ x_obstacle を手前に引いて前車への詰めすぎを直す。
 
