@@ -430,7 +430,7 @@ def test_pln11_launch_and_nolead_decel():
   a: 巡航候補の止まれは立ち上げ前の目標で判定 (停止中の指令から立ち上げた値で判定すると発進が遅れる)
   b: 低速でも計画が加速を描いたら e2e を外す (18km/h 未満で常に残すと ~25km/h までモデルの弱い加速になる)。
      ⚠ 止まれが立っている間は外さない (赤で巡航候補が加速を出さないように)
-  c: lead なしで止まるつもりのない e2e 減速は A_CRUISE_MIN (-0.5、制動灯が点かない深さ) まで
+  c: lead なしで止まるつもりのない e2e 減速は A_CRUISE_MIN (PLN-12 で -0.3) まで
   """
   src = _read(LONG_PLANNER_PY)
   assert 'cruise_should_stop = should_stop(v_ego, get_cruise_target(' in src, 'PLN-11a: 立ち上げ後の値で止まれを判定している'
@@ -438,10 +438,9 @@ def test_pln11_launch_and_nolead_decel():
   wants = src[src.index('def e2e_wants_decel('):src.index('class LongitudinalPlanner(')]
   assert wants.index('e2e_should_stop') < wants.index('E2E_LOW_V'), 'PLN-11b: 低速の判定より先に止まれを拾わないと赤で外れる'
   assert 0.0 < _literal(LONG_PLANNER_PY, 'E2E_LOW_GO_MARGIN') <= 0.5
-  assert _literal(LONG_PLANNER_PY, 'A_CRUISE_MIN') == -0.5
-  assert 'output_a_target_e2e = max(output_a_target_e2e, A_CRUISE_MIN)' in src, 'PLN-11c: lead なしの e2e 減速が -0.5 で止まらない'
+  assert 'output_a_target_e2e = max(output_a_target_e2e, A_CRUISE_MIN)' in src, 'PLN-11c: lead なしの e2e 減速が A_CRUISE_MIN で止まらない'
   assert 0.0 < _literal(LONG_PLANNER_PY, 'E2E_STOP_PLAN_V') <= 2.0
-  # c は PLN-10 の後 (発進の下限を上書きしない)、PLN-9 の門の前 (門は -0.5 に揃えた値で判定)
+  # c は PLN-10 の後 (発進の下限を上書きしない)、PLN-9 の門の前 (門は A_CRUISE_MIN に揃えた値で判定)
   assert src.index('output_a_target_e2e = max(output_a_target_e2e, PLAN_GO_ACCEL)') < \
          src.index('output_a_target_e2e = max(output_a_target_e2e, A_CRUISE_MIN)') < src.index('if e2e_wants_decel(')
 
@@ -919,16 +918,34 @@ def test_pln1_8_e2e_path_floor_survives():
 
 
 def test_pln5_cruise_decel_floor_survives():
-  """PLN-5 (09-06): 巡航の減速要求を摩擦ブレーキに入らない深さ (-0.5) までに制限する。
+  """PLN-5 (09-06): 巡航の減速要求を摩擦ブレーキに入らない深さまでに制限する (09-06 は -0.5、PLN-12 で -0.3)。
 
   上流の既定は -1.2。戻ると **設定速度を下げただけでブレーキを踏んで合わせに行く**挙動に戻り、
   後続から見てブレーキランプが点く (ACC_BRAKING は aTarget -0.5 より深い帯で点灯率 1.000)。
   ⚠ 本当に制動が要る場面 = 前車追従 (MPC 経路) と e2e はこの定数を通らないので、
     ここを緩めても追従性能は変わらない。根拠 = archive/probes/_acc_brake_threshold.py
   """
-  assert _literal(LONG_PLANNER_PY, 'A_CRUISE_MIN') == -0.5
+  assert _literal(LONG_PLANNER_PY, 'A_CRUISE_MIN') == -0.3, 'PLN-12 (10-20) で -0.3 (上流は -0.5)'
   assert re.search(r'np\.clip\(\s*v_cruise\s*-\s*v_ego\s*,\s*A_CRUISE_MIN\s*,', _read(LONG_PLANNER_PY)), \
     '巡航の減速要求を A_CRUISE_MIN でクリップする行が無い = 定数だけ載っている'
+
+
+def test_pln12_shallow_decel_not_deepened_by_compensation():
+  """PLN-12 (10-20 user 判断「-0.3」): lead なしの減速は -0.3 まで、かつ浅い要求を carcontroller の補正で深くしない。
+
+  車に送った指令 (carOutput) で測ると ACC_BRAKING (制動灯側) は -0.25..-0.3 で 23%・-0.4 前後 50%・-0.5..-0.6 94%
+  (0f6-0f9)。PLN-5 の「-0.5 なら点かない」は目標 aTarget で測った誤り。GS の carcontroller は目標と実測の差を PID で
+  足すので、下り坂では目標 -0.18 が指令 -0.45 になって 5.5s 立ちっぱなしだった (0f7 seg 7)。
+  ⚠ 出力だけ切ると積分が溜まり続け、深い要求が来た瞬間に一気に効く = 積分も同じ床で止める (anti-windup)。
+  """
+  cc = _read(CARCONTROLLER_PY)
+  assert _literal(CARCONTROLLER_PY, 'GS_SHALLOW_DECEL_FLOOR') == _literal(LONG_PLANNER_PY, 'A_CRUISE_MIN'), \
+    'planner の巡航下限と carcontroller の床がずれている'
+  assert 'actuators.accel >= GS_SHALLOW_DECEL_FLOOR' in cc, '浅い要求だけに効かせる条件が落ちた (前車への減速まで浅くなる)'
+  assert 'not stopping and actuators.accel >= GS_SHALLOW_DECEL_FLOOR' in cc, '停止 (stopping) まで床で止めている'
+  assert 'self.long_pid.i = max(self.long_pid.i, GS_SHALLOW_DECEL_FLOOR' in cc, '積分を止めていない = 床を外れた瞬間に溜まった分が一気に効く'
+  # 補正 (PID) の後に置く。前に置くと PID が床を下回る値を作り直す
+  assert cc.index('pcm_accel_cmd = self.long_pid.update(') < cc.index('pcm_accel_cmd = GS_SHALLOW_DECEL_FLOOR')
 
 
 def test_carstate_gs_set_speed_and_precollision_timeout_survive():

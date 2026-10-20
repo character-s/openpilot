@@ -27,6 +27,9 @@ ACCEL_WINDDOWN_LIMIT = -4.0 * DT_CTRL * 3  # m/s^2 / frame
 ACCEL_PID_UNWIND = 0.03 * DT_CTRL * 3  # m/s^2 / frame
 
 MAX_PITCH_COMPENSATION = 1.5  # m/s^2
+# GS450h PLN-12 (10-20, user 判断「-0.3」): 車に送る指令と ACC_BRAKING (制動灯側) の関係 (0f6-0f9 実測):
+#   -0.15 より浅い 3% 以下 / -0.25..-0.3 23% / -0.4 前後 50% / -0.5..-0.6 94%。planner の A_CRUISE_MIN と同じ値
+GS_SHALLOW_DECEL_FLOOR = -0.3  # m/s^2
 
 # LKA limits
 # EPS faults if you apply torque while the steering rate is above 100 deg/s for too long
@@ -291,6 +294,15 @@ class CarController(CarControllerBase, GasInterceptorCarController):
                                                speed=CS.out.vEgo,
                                                feedforward=pcm_accel_cmd,
                                                freeze_integrator=actuators.longControlState != LongCtrlState.pid)
+
+          # GS450h PLN-12: 浅い減速要求 (>= GS_SHALLOW_DECEL_FLOOR) を、目標と実測の差を埋める補正でそれより深くしない。
+          # 下り坂では目標 -0.18 が指令 -0.45 まで深くなり、ACC_BRAKING (制動灯側) が 5.5s 立ちっぱなしになった (0f7 seg 7)。
+          # 出力だけ切ると積分が溜まり続け、深い要求が来た瞬間に一気に効くので、積分も同じ床に合わせて止める。
+          # 前車への減速・停止 (要求がこれより深い / stopping) は今までどおり補正する
+          if self.CP.carFingerprint == CAR.LEXUS_GS_F and not stopping and actuators.accel >= GS_SHALLOW_DECEL_FLOOR \
+                  and pcm_accel_cmd < GS_SHALLOW_DECEL_FLOOR:
+            self.long_pid.i = max(self.long_pid.i, GS_SHALLOW_DECEL_FLOOR - (self.long_pid.p + self.long_pid.d + self.long_pid.f))
+            pcm_accel_cmd = GS_SHALLOW_DECEL_FLOOR
         else:
           self.long_pid.reset()
 

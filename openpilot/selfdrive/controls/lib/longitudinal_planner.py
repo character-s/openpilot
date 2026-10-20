@@ -31,7 +31,11 @@ J_CRUISE_BP = [0., 10.0, 25., 40.]
 # ⚠ 本当に制動が要る場面 = 前車追従 (MPC 候補) と e2e 候補はこの定数を通らないので影響しない。
 #   下り坂の速度超過もここに含まれるが、user 判断で「ブレーキを踏むほどではない」= -0.5 のまま。
 # (10-19 追従: upstream も #39060 で同じ -0.5 にした)
-A_CRUISE_MIN = -0.5
+# ★ PLN-12 (10-20) で -0.3 に下げた (user 判断「-0.3」): 車に送った指令 (carOutput) で測り直すと ACC_BRAKING は
+#   -0.25..-0.3 で 23%・-0.4 前後で 50%・-0.5..-0.6 で 94% 立つ (0f6-0f9、_acc_brake_threshold.py)。上の「-0.5 なら点かない」は
+#   目標 aTarget で測っていたための誤り (GS の carcontroller は目標と実測の差を PID で足すので、指令は目標より深くなる)。
+#   carcontroller 側の GS_SHALLOW_DECEL_FLOOR と同じ値にしておく (浅い要求を補正でこれより深くしない)
+A_CRUISE_MIN = -0.3
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 # PLN-1_8 (2026-08-29): e2e の action ヘッドは -2.7 付近で飽和する。route 016 の信号停止では
 # 同じモデルの経路 (modelV2.acceleration) が -3.3 を描いているのに action は -2.67 止まりで、
@@ -85,11 +89,11 @@ PLAN_GO_IDX = 15             # ⚠ 1 点は 20Hz で揺れ (route ed は 0.08-0.
 PLAN_GO_MAX_V = 3.0          # [m/s] ~11km/h 未満 (停止・発進直後) だけ
 PLAN_GO_ACCEL = 0.5          # [m/s^2] 発進の加速度の下限 (穏やかに)
 
-# GS450h PLN-11c (10-20): lead なしで e2e が減速を出すときも、止まるつもりでなければ PLN-5 の A_CRUISE_MIN (-0.5、制動灯が
-# 点かない深さ) で止める。追従前は lead なしの減速が巡航候補だけだったので -0.5 で収まっていたが、PLN-9 で e2e の減速を
+# GS450h PLN-11c (10-20): lead なしで e2e が減速を出すときも、止まるつもりでなければ PLN-5 の A_CRUISE_MIN (PLN-12 で -0.3、
+# 制動灯側に入りにくい深さ) で止める。追従前は lead なしの減速が巡航候補だけだったので -0.5 で収まっていたが、PLN-9 で e2e の減速を
 # そのまま候補に入れたため、lead なしの自主減速が強くなった (user 10-20「前はブレーキランプがつかない -0.5 までに制限してた」)。
 # 例外 = 止まるつもり (action の止まれ / 計画速度が地平線内で E2E_STOP_PLAN_V を下回る = 信号・一時停止・飛び出し) と、
-# 急な減速 (PLN-1_8 の門 E2E_ACCEL_PATH_GATE より深い)。⚠ 遠い赤信号への接近は、計画が止まりを描くまで -0.5 で減速する
+# 急な減速 (PLN-1_8 の門 E2E_ACCEL_PATH_GATE より深い)。⚠ 遠い赤信号への接近は、計画が止まりを描くまで A_CRUISE_MIN で減速する
 E2E_STOP_PLAN_V = 1.0        # [m/s] modelV2.velocity (~10s 先まで) の最小がこれ未満 = モデルは止まるつもり
 
 
@@ -227,7 +231,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       output_should_stop_e2e = False
       output_a_target_e2e = max(output_a_target_e2e, PLAN_GO_ACCEL)
 
-    # PLN-11c: lead なしで止まるつもりのない e2e 減速は -0.5 (制動灯が点かない深さ) まで
+    # PLN-11c: lead なしで止まるつもりのない e2e 減速は A_CRUISE_MIN (-0.3、制動灯側に入りにくい深さ) まで
     if (not sm['radarState'].leadOne.present and not output_should_stop_e2e and output_a_target_e2e > E2E_ACCEL_PATH_GATE
             and len(plan_v) and float(np.min(np.array(plan_v))) > E2E_STOP_PLAN_V):
       output_a_target_e2e = max(output_a_target_e2e, A_CRUISE_MIN)
