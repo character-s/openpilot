@@ -340,11 +340,7 @@ void safety_tick(void) {
     }
 
     // enforce minimum frequency for safety-relevant messages
-    // GS450h (10-19 follow): the upstream refactor dropped the ignore_frequency_check exemption while the field
-    // (declarations.h) and its users (toyota.h DSU_CRUISE 0x365 @ 5Hz, chrysler, tesla) remain. On unsupported-DSU
-    // cars 0x365 then always fails the minimum frequency, rx_checks_invalid never clears and main ON -> controlsMismatch.
-    bool frequency_invalid = !current_safety_config.rx_checks[i].msg[current_safety_config.rx_checks[i].status.index].ignore_frequency_check &&
-                             (frequency < 10U);
+    bool frequency_invalid = !current_safety_config.rx_checks[i].msg[current_safety_config.rx_checks[i].status.index].ignore_frequency_check && (frequency < 10U);
     if (lagging || frequency_invalid || !is_msg_valid(current_safety_config.rx_checks, i)) {
       rx_checks_invalid = true;
       controls_allowed = false;
