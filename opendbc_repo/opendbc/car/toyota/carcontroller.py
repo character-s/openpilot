@@ -299,7 +299,12 @@ class CarController(CarControllerBase, GasInterceptorCarController):
           # 下り坂では目標 -0.18 が指令 -0.45 まで深くなり、ACC_BRAKING (制動灯側) が 5.5s 立ちっぱなしになった (0f7 seg 7)。
           # 出力だけ切ると積分が溜まり続け、深い要求が来た瞬間に一気に効くので、積分も同じ床に合わせて止める。
           # 前車への減速・停止 (要求がこれより深い / stopping) は今までどおり補正する
-          if self.CP.carFingerprint == CAR.LEXUS_GS_F and not stopping and actuators.accel >= GS_SHALLOW_DECEL_FLOOR \
+          # ⚠ 浅いかは planner の要求 (actuators.accel) ではなく、レート制限後の指令 (self.prev_accel、ピッチ補償の前) で見る (10-29)。
+          #   停止保持 (-2.0) から出るとき指令はレート制限でまだ -1.8 にいて、要求 (+0.3) で見ると床が積分を +1.5 まで
+          #   持ち上げ、発進で +0.9-1.0 上乗せ・次の減速にも +0.3-0.6 残っていた (渋滞のトラックの後ろで止まるたびに
+          #   2.4-5m まで詰まった、10e t1285-2620。PLN-12 前の f7/f9 は上乗せ ~0)。ピッチ補償込みの feedforward で見ると
+          #   下り坂で床が外れる (0f7 で 8.1s 深くなる)。再生 = openpilot repo archive/probes/_cc_pid_replay.py (0f7 0s / 10e 上乗せ +0.0)
+          if self.CP.carFingerprint == CAR.LEXUS_GS_F and not stopping and self.prev_accel >= GS_SHALLOW_DECEL_FLOOR \
                   and pcm_accel_cmd < GS_SHALLOW_DECEL_FLOOR:
             self.long_pid.i = max(self.long_pid.i, GS_SHALLOW_DECEL_FLOOR - (self.long_pid.p + self.long_pid.d + self.long_pid.f))
             pcm_accel_cmd = GS_SHALLOW_DECEL_FLOOR

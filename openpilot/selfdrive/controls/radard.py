@@ -26,6 +26,7 @@ SPEED, ACCEL = 0, 1     # Kalman filter states enum
 
 # stationary qualification parameters
 V_EGO_STATIONARY = 4.   # no stationary object flag below this speed
+LOW_SPEED_OVERRIDE_SPEED_GAP = 1.0  # [m/s] GS 450h: low speed track this much slower than the model lead is not the lead
 
 RADAR_TO_CAMERA = 1.52  # RADAR is ~ 1.5m ahead from center of mesh frame
 
@@ -174,9 +175,13 @@ def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capn
     low_speed_tracks = [c for c in tracks.values() if c.potential_low_speed_lead(v_ego)]
     if len(low_speed_tracks) > 0:
       closest_track = min(low_speed_tracks, key=lambda c: c.dRel)
+      # GS 450h (2026-10-28): a stationary radar return nearer than the lead (modelProb 0) kept the car
+      # stopped while the lead drove off (route 10e seg 14: 3.9m / 0 m/s vs model lead 8m -> 23m at 3 m/s).
+      # A track clearly slower than the model lead is not the lead. When both are stopped it is kept.
+      slower_than_lead = lead_prob > .5 and lead_msg.v[0] - (v_ego + closest_track.vRel) > LOW_SPEED_OVERRIDE_SPEED_GAP
 
       # Only choose new track if it is actually closer than the previous one
-      if (not lead_dict['present']) or (closest_track.dRel < lead_dict['dRel']):
+      if not slower_than_lead and ((not lead_dict['present']) or (closest_track.dRel < lead_dict['dRel'])):
         lead_dict = closest_track.get_RadarState()
 
   return lead_dict

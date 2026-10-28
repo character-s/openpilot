@@ -60,6 +60,7 @@ PANDAD_BIN = 'openpilot/selfdrive/pandad/pandad'
 CARSTATE_PY = 'opendbc_repo/opendbc/car/toyota/carstate.py'
 CAR_EVENTS_PY = 'openpilot/selfdrive/car/car_events.py'
 LONG_PLANNER_PY = 'openpilot/selfdrive/controls/lib/longitudinal_planner.py'
+RADARD_PY = 'openpilot/selfdrive/controls/radard.py'
 SELFDRIVED_PY = 'openpilot/selfdrive/selfdrived/selfdrived.py'
 MODELD_HELPERS_PY = 'openpilot/selfdrive/modeld/helpers.py'
 HARDWARED_PY = 'openpilot/system/hardware/hardwared.py'
@@ -310,6 +311,20 @@ def test_pln3_auto_resume_survives():
     'small model で自動発進が有効になっている。big 限定が仕様'
   assert _literal(LONGCONTROL_PY, 'PLN3_GO_SUSTAIN_NOLEAD_BIG') == 1.5, \
     '青発進 sustain が 1.5s から変わっている (08-26 に 2.0 -> 1.5)'
+
+
+def test_low_speed_override_skips_track_slower_than_lead():
+  """10-28: 停止中に前車より近い静止 radar 反射 (modelProb 0) が lead に残り、前車が出ても発進しなかった (10e seg 14)。
+
+  上流の low_speed_override は 4m/s 未満で vision の確認なしに一番近い track を採る。vision の前車より 1m/s 以上遅い
+  track は前車ではないので採らない。両方止まっているときは上流どおり (停止中に前の物へ詰めない)。
+  """
+  assert _literal(RADARD_PY, 'LOW_SPEED_OVERRIDE_SPEED_GAP') == 1.0
+  src = _read(RADARD_PY)
+  assert re.search(r'slower_than_lead = lead_prob > \.5 and lead_msg\.v\[0\] - \(v_ego \+ closest_track\.vRel\) > LOW_SPEED_OVERRIDE_SPEED_GAP', src), \
+    'radard の low_speed_override の「前車より遅い track は採らない」が落ちている'
+  assert re.search(r'if not slower_than_lead and \(\(not lead_dict\[.present.\]\) or', src), \
+    'slower_than_lead が差し替えの判定に使われていない'
 
 
 def test_pln1_5_stop_threshold_survives():
@@ -941,8 +956,17 @@ def test_pln12_shallow_decel_not_deepened_by_compensation():
   cc = _read(CARCONTROLLER_PY)
   assert _literal(CARCONTROLLER_PY, 'GS_SHALLOW_DECEL_FLOOR') == _literal(LONG_PLANNER_PY, 'A_CRUISE_MIN'), \
     'planner の巡航下限と carcontroller の床がずれている'
-  assert 'actuators.accel >= GS_SHALLOW_DECEL_FLOOR' in cc, '浅い要求だけに効かせる条件が落ちた (前車への減速まで浅くなる)'
-  assert 'not stopping and actuators.accel >= GS_SHALLOW_DECEL_FLOOR' in cc, '停止 (stopping) まで床で止めている'
+  # ⚠ 10-29: 浅いかはレート制限後・ピッチ補償前の指令 (self.prev_accel) で見る。planner の要求 (actuators.accel) で見ると、
+  #   停止保持 (-2.0) から出る瞬間 (レート制限で指令はまだ -1.8) に床が積分を +1.5 まで持ち上げ、発進で +0.9-1.0 上乗せ・
+  #   次の減速に +0.3-0.6 残る = 渋滞のトラックの後ろで止まるたびに車間が詰まった (10e t1285-2620)。
+  #   ピッチ補償込み (long_pid.f) で見ると下り坂で床が外れる (0f7 で 8.1s 深くなる)
+  assert 'self.prev_accel >= GS_SHALLOW_DECEL_FLOOR' in cc, '浅い要求だけに効かせる条件が落ちた (前車への減速まで浅くなる)'
+  assert 'actuators.accel >= GS_SHALLOW_DECEL_FLOOR' not in cc, \
+    '床の判定が planner の要求に戻っている (停止からの発進で積分が持ち上がる)'
+  assert 'not stopping and self.prev_accel >= GS_SHALLOW_DECEL_FLOOR' in cc, '停止 (stopping) まで床で止めている'
+  # self.prev_accel はレート制限の直後 (ピッチ補償の前) に更新される値であること
+  assert re.search(r'pcm_accel_cmd = rate_limit\(pcm_accel_cmd, self\.prev_accel.*\n\s*self\.prev_accel = pcm_accel_cmd', cc), \
+    'self.prev_accel がレート制限後の指令でなくなっている (PLN-12 の判定がずれる)'
   assert 'self.long_pid.i = max(self.long_pid.i, GS_SHALLOW_DECEL_FLOOR' in cc, '積分を止めていない = 床を外れた瞬間に溜まった分が一気に効く'
   # 補正 (PID) の後に置く。前に置くと PID が床を下回る値を作り直す
   assert cc.index('pcm_accel_cmd = self.long_pid.update(') < cc.index('pcm_accel_cmd = GS_SHALLOW_DECEL_FLOOR')
