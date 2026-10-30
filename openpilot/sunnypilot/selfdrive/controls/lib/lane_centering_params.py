@@ -43,6 +43,7 @@ cereal (→ opendbc submodule) を経由しないと import できない状態�
 """
 import os
 import tempfile
+import threading
 
 # 値の実体。⚠⚠ **`/data/params` の外であることが要**。中に置くと manager 起動のたびに
 # `clearAll` に消される (モジュール docstring 参照)。
@@ -206,3 +207,69 @@ def write(key, value) -> bool:
   else:
     text = repr(float(value))
   return _write_file(key, text)
+
+
+# ── upstream の Blendful との排他 (★ GS 追加 10-30) ──────────────────────
+# Blendful (upstream #2073、modeld_v2) も白線から車線中心への曲率を足す。両方 ON だと同じずれを 2 回直す
+# (Blendful は action の曲率だけを直し modelV2.position は素のままなので、LC はまだずれていると見て足す)。
+# ⇒ **後から ON にした方を残し、前から ON の方を OFF に書き戻す** (user 10-30)。自動で黙って抜くのではなく
+#   トグルそのものを倒すので、画面の見た目と実際の挙動が食い違わない。
+# ⚠ Blendful の値は openpilot の Params (`/data/params`) にある = upstream のキー。LC 側はこれまでどおり
+#   このモジュールのファイルで読み書きし、Blendful 側だけ呼び出し側から get / put を受け取る。
+BLENDFUL_KEY = "Blendful"
+
+
+def centering_to_turn_off(prev: tuple[bool, bool] | None, lc_on: bool, blendful_on: bool) -> str | None:
+  """両方 ON のとき OFF にする側のキー (KEY_ENABLED / BLENDFUL_KEY) を返す。両方 ON でなければ None。
+
+  prev = 前回見た (LC, Blendful)。None = まだ一度も見ていない (起動直後)。
+  ⚠ どちらが後か分からないとき (起動時から両方 ON / 1 周期の間に両方 ON になった) は LC を残す = 実績のある方。
+  """
+  if not (lc_on and blendful_on):
+    return None
+  if prev is not None:
+    prev_lc, prev_blendful = prev
+    if prev_lc and not prev_blendful:
+      return KEY_ENABLED      # Blendful が後から ON
+  return BLENDFUL_KEY
+
+
+class CenteringExclusive:
+  """`centering_to_turn_off` を前回値つきで回す。UI の params 更新 (5Hz) から呼ぶ。
+
+  ⚠ UI は params 更新を背景スレッドと画面 (show_event) の両方から呼ぶので lock で 1 本にする。
+  ⚠ 書き戻しに失敗したら前回値を進めない = 次の周期に同じ判定でやり直す (進めると両方 ON が前回値になり、
+    次は「どちらが後か分からない」扱いで逆側を倒してしまう)。
+  """
+
+  def __init__(self) -> None:
+    self._prev: tuple[bool, bool] | None = None
+    self._lock = threading.Lock()
+    self.generation = 0     # 書き戻すたびに +1。開いている画面はこれを見てトグルを読み直す
+
+  def enforce(self, get_blendful, put_blendful) -> str | None:
+    """倒したキーを返す (倒さなかった / 倒せなかったら None)。
+
+    ⚠ 例外は外へ出さない。UI の params 更新スレッドから呼ばれるので、ここで落ちるとそのスレッドごと止まる。
+    """
+    with self._lock:
+      lc_on = read_bool(KEY_ENABLED)
+      try:
+        blendful_on = bool(get_blendful())
+      except Exception:
+        return None
+      off = centering_to_turn_off(self._prev, lc_on, blendful_on)
+      if off == KEY_ENABLED:
+        if not write(KEY_ENABLED, False):
+          return None
+        lc_on = False
+      elif off == BLENDFUL_KEY:
+        try:
+          put_blendful(False)
+        except Exception:
+          return None
+        blendful_on = False
+      self._prev = (lc_on, blendful_on)
+      if off is not None:
+        self.generation += 1
+      return off

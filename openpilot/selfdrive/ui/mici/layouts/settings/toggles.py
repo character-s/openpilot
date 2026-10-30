@@ -94,6 +94,7 @@ class TogglesLayoutMici(NavScroller):
       gui_app.set_show_fps(True)
 
     ui_state.add_engaged_transition_callback(self._update_toggles)
+    self._centering_generation = ui_state.centering_exclusive.generation
 
   def _update_state(self):
     super()._update_state()
@@ -103,6 +104,11 @@ class TogglesLayoutMici(NavScroller):
       if personality != ui_state.personality and ui_state.started:
         self._personality_toggle.set_personality(personality)
       ui_state.personality = personality
+
+    # Blendful を ON にして Lane Centering が倒されたら、開いているこの画面にも映す (逆向きは models 画面が毎 frame 読む)
+    if ui_state.centering_exclusive.generation != self._centering_generation:
+      self._centering_generation = ui_state.centering_exclusive.generation
+      self._lane_centering_toggle.refresh()
 
   def show_event(self):
     super().show_event()

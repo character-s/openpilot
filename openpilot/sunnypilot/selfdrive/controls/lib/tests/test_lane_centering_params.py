@@ -267,3 +267,96 @@ def test_controller_reads_what_the_ui_wrote(param_dir):
   assert c.offset == pytest.approx(-0.2)
   assert c.e2e_authority == pytest.approx(0.5)
   assert c.pause_on_signal is False
+
+
+# ── upstream の Blendful との排他 (10-30) ──────────────────────────────
+
+class _FakeBlendful:
+  """Params の "Blendful" の代わり。put が失敗する端末も作れるようにしておく。"""
+
+  def __init__(self, on: bool = False, fail_put: bool = False):
+    self.on = on
+    self.fail_put = fail_put
+
+  def get(self) -> bool:
+    return self.on
+
+  def put(self, v: bool) -> None:
+    if self.fail_put:
+      raise OSError("put failed")
+    self.on = bool(v)
+
+
+@pytest.mark.parametrize("prev, lc_on, blendful_on, expected", [
+  ((True, False), True, True, lcp.KEY_ENABLED),     # LC が先、Blendful を後から ON → LC を倒す
+  ((False, True), True, True, lcp.BLENDFUL_KEY),    # Blendful が先、LC を後から ON → Blendful を倒す
+  (None, True, True, lcp.BLENDFUL_KEY),             # 起動時から両方 ON = どちらが後か不明 → LC を残す
+  ((False, False), True, True, lcp.BLENDFUL_KEY),   # 1 周期の間に両方 ON → LC を残す
+  ((True, False), True, False, None),
+  ((False, True), False, True, None),
+  (None, False, False, None),
+])
+def test_the_later_one_wins(prev, lc_on, blendful_on, expected):
+  """後から ON にした方を残し、前から ON の方を倒す (user 10-30)。分からないときは実績のある LC を残す。"""
+  assert lcp.centering_to_turn_off(prev, lc_on, blendful_on) == expected
+
+
+def test_turning_blendful_on_turns_lane_centering_off(param_dir):
+  assert lcp.write(lcp.KEY_ENABLED, True)
+  bf = _FakeBlendful(on=False)
+  ex = lcp.CenteringExclusive()
+  assert ex.enforce(bf.get, bf.put) is None
+  bf.on = True                                    # models 画面で Blendful を ON
+  assert ex.enforce(bf.get, bf.put) == lcp.KEY_ENABLED
+  assert lcp.read_bool(lcp.KEY_ENABLED) is False
+  assert bf.on is True
+  assert ex.generation == 1
+  assert ex.enforce(bf.get, bf.put) is None       # 落ち着いたら何もしない
+  assert ex.generation == 1
+
+
+def test_turning_lane_centering_on_turns_blendful_off(param_dir):
+  assert lcp.write(lcp.KEY_ENABLED, False)
+  bf = _FakeBlendful(on=True)
+  ex = lcp.CenteringExclusive()
+  assert ex.enforce(bf.get, bf.put) is None
+  assert lcp.write(lcp.KEY_ENABLED, True)         # toggles 画面で LC を ON
+  assert ex.enforce(bf.get, bf.put) == lcp.BLENDFUL_KEY
+  assert bf.on is False
+  assert lcp.read_bool(lcp.KEY_ENABLED) is True
+
+
+def test_both_on_at_boot_keeps_lane_centering(param_dir):
+  assert lcp.write(lcp.KEY_ENABLED, True)
+  bf = _FakeBlendful(on=True)
+  assert lcp.CenteringExclusive().enforce(bf.get, bf.put) == lcp.BLENDFUL_KEY
+  assert bf.on is False
+  assert lcp.read_bool(lcp.KEY_ENABLED) is True
+
+
+def test_a_failed_write_back_retries_the_same_way(param_dir):
+  """⚠ 倒せなかったときに前回値を進めると、次の周期は「両方 ON が前回値」= 逆側を倒してしまう。"""
+  assert lcp.write(lcp.KEY_ENABLED, False)
+  bf = _FakeBlendful(on=True, fail_put=True)
+  ex = lcp.CenteringExclusive()
+  ex.enforce(bf.get, bf.put)
+  assert lcp.write(lcp.KEY_ENABLED, True)
+  assert ex.enforce(bf.get, bf.put) is None       # put が失敗 = 倒せていない
+  assert ex.generation == 0
+  bf.fail_put = False
+  assert ex.enforce(bf.get, bf.put) == lcp.BLENDFUL_KEY   # 次の周期も Blendful 側を倒す
+  assert lcp.read_bool(lcp.KEY_ENABLED) is True
+
+
+def test_a_broken_blendful_read_does_not_raise(param_dir):
+  """UI の params 更新スレッドから呼ばれるので、例外で止めてはいけない。"""
+  def boom():
+    raise RuntimeError("params broken")
+  assert lcp.CenteringExclusive().enforce(boom, lambda v: None) is None
+
+
+def test_blendful_key_matches_params_keys_h():
+  """BLENDFUL_KEY は upstream の Params キー。名前が変わったら排他が黙って効かなくなるので照合しておく。"""
+  here = os.path.dirname(__file__)
+  keys_h = os.path.abspath(os.path.join(here, '..', '..', '..', '..', '..', 'common', 'params_keys.h'))
+  assert f'{{"{lcp.BLENDFUL_KEY}",' in open(keys_h, encoding='utf-8').read()

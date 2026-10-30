@@ -12,6 +12,7 @@ from opendbc.sunnypilot.car.interfaces import has_bsm
 from openpilot.common.params import Params
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.display import OnroadBrightness
 from openpilot.sunnypilot.models.helpers import ACTIVE_BUNDLE_KEYS, get_active_source
+from openpilot.sunnypilot.selfdrive.controls.lib import lane_centering_params as lcp
 from openpilot.sunnypilot.sunnylink.sunnylink_state import SunnylinkState
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.sunnypilot.widgets.screen_saver import ScreenSaverSP
@@ -66,6 +67,8 @@ class UIStateSP:
     self.custom_torque_params: bool = False
     self.torque_override_enabled: bool = False
     self._sp_initialized: bool = False
+    # GS: Blendful と Lane Centering は後から ON にした方を残す (lane_centering_params の排他の節)
+    self.centering_exclusive = lcp.CenteringExclusive()
 
   def update(self) -> None:
     if self.sunnylink_enabled:
@@ -162,6 +165,8 @@ class UIStateSP:
       self.has_icbm = self.CP_SP.intelligentCruiseButtonManagementAvailable and self.params.get_bool("IntelligentCruiseButtonManagement")
 
     self._enforce_constraints()
+    self.centering_exclusive.enforce(lambda: self.params.get_bool(lcp.BLENDFUL_KEY),
+                                     lambda v: self.params.put_bool(lcp.BLENDFUL_KEY, v, block=True))
     source = get_active_source(chestnut=self.chestnut_present, chestnut_active=self.chestnut_active,
                                chestnut_loading=self.chestnut_loading, offroad=self.is_offroad())
     self.active_bundle = self.params.get(ACTIVE_BUNDLE_KEYS[source])
