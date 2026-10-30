@@ -13,7 +13,7 @@ from opendbc.car.toyota.values import CAR, NO_STOP_TIMER_CAR, TSS2_CAR, \
 from opendbc.can import CANPacker
 
 from opendbc.sunnypilot.car.toyota.gas_interceptor import GasInterceptorCarController
-from opendbc.sunnypilot.car.toyota.values import ToyotaFlagsSP
+from opendbc.sunnypilot.car.toyota.values import ToyotaFlagsSP, TSS2_SMOOTH_KI
 
 Ecu = structs.CarParams.Ecu
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -44,7 +44,7 @@ MAX_USER_TORQUE = 500
 SDSU_ENGAGE_CANCEL_SUPPRESS_TX = 2
 
 
-def get_long_tune(CP, params):
+def get_long_tune(CP, params, CP_SP):
   # LEXUS_GS_F (TSS-P) borrows the TSS2 path here (GS 450h port)
   if CP.flags & ToyotaFlags.TSS2 or CP.carFingerprint == CAR.LEXUS_GS_F:
     kiBP = [2., 5.]
@@ -52,6 +52,9 @@ def get_long_tune(CP, params):
   else:
     kiBP = [0., 5., 35.]
     kiV = [3.6, 2.4, 1.5]
+
+  if CP_SP.flags & ToyotaFlagsSP.TSS2_SMOOTH:
+    kiBP, kiV = TSS2_SMOOTH_KI
 
   return PIDController(0.0, (kiBP, kiV), k_f=1.0,
                        pos_limit=params.ACCEL_MAX, neg_limit=params.ACCEL_MIN,
@@ -88,7 +91,7 @@ class CarController(CarControllerBase, GasInterceptorCarController):
     self.sdsu_cancel_suppress_tx = 0
 
     # *** start long control state ***
-    self.long_pid = get_long_tune(self.CP, self.params)
+    self.long_pid = get_long_tune(self.CP, self.params, self.CP_SP)
     self.aego = FirstOrderFilter(0.0, 0.25, DT_CTRL * 3)
     self.pitch = FirstOrderFilter(0, 0.5, DT_CTRL)
     self.pitch_hp = HighPassFilter(0.0, 0.25, 1.5, DT_CTRL)
