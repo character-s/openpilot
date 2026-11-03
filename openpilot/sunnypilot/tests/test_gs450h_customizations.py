@@ -65,6 +65,7 @@ SELFDRIVED_PY = 'openpilot/selfdrive/selfdrived/selfdrived.py'
 MODELD_HELPERS_PY = 'openpilot/selfdrive/modeld/helpers.py'
 HARDWARED_PY = 'openpilot/system/hardware/hardwared.py'
 STALL_WATCHDOG_PY = 'openpilot/system/hardware/stall_watchdog.py'
+LAG_SNAPSHOT_PY = 'openpilot/system/hardware/lag_snapshot.py'
 PROCESS_PY = 'openpilot/system/manager/process.py'
 PROCESS_CONFIG_PY = 'openpilot/system/manager/process_config.py'
 OSM_MAP_DATA_PY = 'openpilot/sunnypilot/mapd/live_map_data/osm_map_data.py'
@@ -1130,6 +1131,23 @@ def test_hardwared_stall_watchdog_survives():
   loop = thread[thread.index('while not end_event.is_set():'):].split('\n')
   assert loop[1].strip() == 'stall_watchdog.beat()', 'beat() がループの先頭に無い (sm.update 側で止まったときを取りこぼす)'
   assert 'dump_traceback_later' in _read(STALL_WATCHDOG_PY), 'GIL を握ったまま止まってもスタックを取れる経路が消えた'
+
+
+def test_hardwared_lag_snapshot_survives():
+  """11-02: route 122 で System Lagging が出続けた (そのブートだけ big core と GPU が約 1.4 倍遅く、core 4 が溢れた)。
+
+  再起動で治り、journald が永続化されていないのでカーネルログごと消えて原因を追えなかった。
+  lag_snapshot は lagging が続いたブートの状態と、比べる平常時の値を /data/community/lag_snapshots に残す。
+  ⚠ hardwared.py は上流がよく触る。追従で上流版に戻ると計測が黙って消え、次の遅いブートが空振りになる。
+  """
+  src = _read(HARDWARED_PY)
+  thread = src[src.index('def hardware_thread('):]
+  thread = thread[:thread.index('\ndef ', 1)]
+  assert 'LagSnapshot(' in thread, 'hardware_thread で LagSnapshot を作っていない'
+  loop = thread[thread.index('while not end_event.is_set():'):]
+  assert re.search(r"lag_snapshot\.update\(time\.monotonic\(\), started_ts, sm\['selfdriveState'\]\.alertType\.startswith\('selfdrivedLagging'\)\)", loop), \
+    'ループで lag_snapshot.update() を呼んでいない (onroad の判定か lagging の判定が変わった)'
+  assert 'LagSnapshot' in _toplevel_names(LAG_SNAPSHOT_PY), f'{LAG_SNAPSHOT_PY} から LagSnapshot が消えた'
 
 
 def test_tinygrad_flock_self_contention_fix_survives():

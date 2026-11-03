@@ -30,6 +30,7 @@ from openpilot.system.hardware.fan_controller import FanController
 from openpilot.system.hardware.chestnut.monitoring import chestnut_state_thread
 from openpilot.system.hardware.chestnut.status import ChestnutStatus
 from openpilot.system.hardware.stall_watchdog import StallWatchdog
+from openpilot.system.hardware.lag_snapshot import LagSnapshot
 from openpilot.selfdrive.modeld.helpers import _write_crash_file, save_dmesg_snapshot
 from openpilot.common.version import terms_version, training_version, get_build_metadata, terms_version_sp
 
@@ -261,6 +262,8 @@ def hardware_thread(end_event, hw_queue) -> None:
                                  write_report=lambda text: _write_crash_file("hwstall", "", text),
                                  save_dmesg=lambda: save_dmesg_snapshot("-hwstall"))
   stall_watchdog.start()
+  # GS450h: System Lagging が続いたブートの状態 (dmesg / 実クロック等) と、比べる平常時の値を残す (lag_snapshot.py)。
+  lag_snapshot = LagSnapshot(log_event=cloudlog.event)
 
   while not end_event.is_set():
     stall_watchdog.beat()
@@ -449,6 +452,8 @@ def hardware_thread(end_event, hw_queue) -> None:
       started_ts = None
       if off_ts is None:
         off_ts = time.monotonic()
+
+    lag_snapshot.update(time.monotonic(), started_ts, sm['selfdriveState'].alertType.startswith('selfdrivedLagging'))
 
     # Offroad power monitoring
     voltage = None if peripheralState.pandaType == log.PandaState.PandaType.unknown else peripheralState.voltage
