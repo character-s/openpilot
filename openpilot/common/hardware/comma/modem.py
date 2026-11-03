@@ -133,6 +133,11 @@ SIM_READ_FAILS_BEFORE_RESET = 10  # identity 読みの連続失敗がこの回�
 RADIO_OFF_WAIT = 4.0   # [s] AT+CFUN=0 のあと待つ時間
 RADIO_ON_WAIT = 12.0   # [s] AT+CFUN=1 のあと SIM とネットワークが立ち上がるまで待つ時間
 
+# GS450h: SIM は読めているのに +CREG / +CGREG が登録済みにならず、SEARCHING から出られないことがある
+# (11-02 に 2 ブート続けて踏んだ。1 回目は走行中ずっと、2 回目は 13 分後に勝手に登録された)。
+# 普段は SEARCHING に入って 1-46 秒で登録されるので、それを大きく超えたらラジオを入れ直して探し直させる。
+SEARCH_TIMEOUT_BEFORE_RESET = 180.0  # [s]
+
 
 class PPPSession:
   """Owns pppd lifecycle, fail tracking, and PPP routing."""
@@ -238,6 +243,8 @@ class Modem:
     self._apn = ""  # blank = network-provided via PCO
     self._roaming_allowed = True
     self._sim_read_fails = 0  # GS450h: SIM_READ_FAILS_BEFORE_RESET 参照
+    self._search_since: float | None = None  # GS450h: SEARCH_TIMEOUT_BEFORE_RESET 参照
+    self._last_reg: tuple[str, str] | None = None
     self.running = True
     self.S = INITIAL_STATE.copy()
 
@@ -350,6 +357,21 @@ class Modem:
     if self._sim_read_fails % SIM_READ_FAILS_BEFORE_RESET:
       return
     logging.warning(f"SIM unreadable after {self._sim_read_fails} tries, power-cycling the radio (AT+CFUN=0/1)")
+    self._power_cycle_radio()
+
+  def _reset_radio_if_not_registered(self, reg: str, greg: str):
+    """GS450h: 登録が取れないまま SEARCHING で粘り続けるのをやめて、ラジオを入れ直す (SEARCH_TIMEOUT_BEFORE_RESET 参照)。"""
+    if self._search_since is None:
+      self._search_since = time.monotonic()
+    waited = time.monotonic() - self._search_since
+    if waited < SEARCH_TIMEOUT_BEFORE_RESET:
+      return
+    extra = self._atv('AT+QENG="servingcell"', "+QENG:")
+    logging.warning(f"not registered after {waited:.0f}s (creg={reg} cgreg={greg} servingcell={extra}), power-cycling the radio (AT+CFUN=0/1)")
+    self._power_cycle_radio()
+    self._search_since = time.monotonic()
+
+  def _power_cycle_radio(self):
     self._at("AT+CFUN=0")
     time.sleep(RADIO_OFF_WAIT)
     self._at("AT+CFUN=1")
@@ -384,6 +406,8 @@ class Modem:
 
     self._sim_change = False  # clear since we just re-read identity with the new SIM
     self._publish_state(**identity)
+    self._search_since = time.monotonic()
+    self._last_reg = None
     return State.SEARCHING
 
   def _read_identity(self):
@@ -415,11 +439,16 @@ class Modem:
 
     v = self._atv("AT+CREG?", "+CREG:")
     if not v:
+      self._reset_radio_if_not_registered("no_answer", "no_answer")
       return self._searching_idle()
 
     reg = self._parse_reg(v)
     greg = self._parse_reg(self._atv("AT+CGREG?", "+CGREG:") or "")
     logging.debug(f"creg={reg} cgreg={greg} roaming_allowed={self._roaming_allowed}")
+    # GS450h: 登録が取れない間の経緯を後から追えるよう、変化したときだけ残す (debug は捨てられる)
+    if (reg, greg) != self._last_reg:
+      logging.info(f"registration creg={reg} cgreg={greg}")
+      self._last_reg = (reg, greg)
 
     if reg == "roaming" and not self._roaming_allowed:
       self._publish_state(registration=reg)
@@ -431,6 +460,7 @@ class Modem:
 
     if reg != self.S.get("registration"):
       self._publish_state(registration=reg)
+    self._reset_radio_if_not_registered(reg, greg)
     return self._searching_idle()
 
   def _searching_idle(self):
