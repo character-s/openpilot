@@ -66,6 +66,7 @@ MODELD_HELPERS_PY = 'openpilot/selfdrive/modeld/helpers.py'
 HARDWARED_PY = 'openpilot/system/hardware/hardwared.py'
 STALL_WATCHDOG_PY = 'openpilot/system/hardware/stall_watchdog.py'
 LAG_SNAPSHOT_PY = 'openpilot/system/hardware/lag_snapshot.py'
+BLENDFUL_PY = 'openpilot/sunnypilot/modeld_v2/blendful.py'
 PROCESS_PY = 'openpilot/system/manager/process.py'
 PROCESS_CONFIG_PY = 'openpilot/system/manager/process_config.py'
 OSM_MAP_DATA_PY = 'openpilot/sunnypilot/mapd/live_map_data/osm_map_data.py'
@@ -1148,6 +1149,35 @@ def test_hardwared_lag_snapshot_survives():
   assert re.search(r"lag_snapshot\.update\(time\.monotonic\(\), started_ts, sm\['selfdriveState'\]\.alertType\.startswith\('selfdrivedLagging'\)\)", loop), \
     'ループで lag_snapshot.update() を呼んでいない (onroad の判定か lagging の判定が変わった)'
   assert 'LagSnapshot' in _toplevel_names(LAG_SNAPSHOT_PY), f'{LAG_SNAPSHOT_PY} から LagSnapshot が消えた'
+
+
+def test_blendful_wide_lane_guard_survives():
+  """11-02: Blendful (upstream #2073) は左右の線の真ん中を目標にするので、センターラインの無い対面通行で
+  両側の外側線を自分の車線と見ると道路の真ん中へ寄せる (user 指摘)。線の間隔が 4.0-4.4m で効きを落とし、モデルの左寄りに任せる。
+
+  ⚠ blendful.py は sunnypilot 本家のファイル。追従で本家版に戻るとガードが黙って消え、対面通行で真ん中へ寄る癖が戻る。
+  """
+  assert _literal(BLENDFUL_PY, 'WIDE_LANE_FADE') == (4.0, 4.4), '幅ガードの帯が変わった (実測の根拠は blendful.py のコメント)'
+  src = _read(BLENDFUL_PY)
+  assert 'lane_trust *= wide_scale' in src, 'trust に幅ガードを掛けていない'
+  assert re.search(r'if wide_scale >= 1\.0:.*\n\s*self\.lane_width\.update', src), '広い道の幅を車線幅として覚えないガードが消えた'
+
+
+def test_blendful_heading_damping_survives():
+  """11-03: Blendful ON で新東名 (105-127km/h) に 4-5 秒周期の緩い蛇行 (OFF 比で揺れ +30%、user 指摘)。中心のずれだけを見て
+  寄せると線の見え方の揺らぎを追いかけるので、車線に対する向き (線の傾き) に逆らう項を足した。シミュレーションの根拠は blendful.py のコメント。
+
+  ⚠ blendful.py は sunnypilot 本家のファイル。追従で本家版に戻ると黙って消え、高速の蛇行が戻る。
+  """
+  assert _literal(BLENDFUL_PY, 'HEADING_DAMP') == 0.6, '向きの項の強さが変わった'
+  assert _literal(BLENDFUL_PY, 'HEADING_SPEED') == (22.2, 27.8), '向きの項を効かせる速度帯が変わった (確かめたのは高速だけ)'
+  src = _read(BLENDFUL_PY)
+  assert re.search(r'self\.smooth = self\.smooth \+ .*\n\s*target \+= self\.heading', src), \
+    '向きの項を中心寄せのなましの後で足していない (なますと遅れて揺れを押す側に回る)'
+  assert re.search(r'self\.heading = float\(self\.trust \*', src), '向きの項を信頼度で落としていない (車線変更・回避で邪魔をする)'
+  # 傾きの揺らぎは 22-66m 先の中心のずれになって効くので、高速の直線では寄せ量 (dk) をなます。trust には掛けない
+  assert _literal(BLENDFUL_PY, 'DK_SLOW_TAU') == 2.0, '寄せ量のなましの時定数が変わった'
+  assert 'return float(self.trust * self.dk_slow)' in src, '寄せ量のなましを出力に使っていない'
 
 
 def test_tinygrad_flock_self_contention_fix_survives():

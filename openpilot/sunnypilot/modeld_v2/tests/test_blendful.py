@@ -15,8 +15,8 @@ X = np.array(ModelConstants.X_IDXS)
 BUILD, RELEASE = 0.5, 2.0
 
 
-def frame(center=0.0, plan=0.0, k=0.0, probs=(0.9, 0.9), stds=(0.1, 0.1), width=3.5):
-  road = k * X ** 2 / 2
+def frame(center=0.0, plan=0.0, k=0.0, probs=(0.9, 0.9), stds=(0.1, 0.1), width=3.5, slope=0.0):
+  road = k * X ** 2 / 2 + slope * X  # slope > 0: 線が先で左へ寄る = 車が車線に対して右を向いている
   lines = np.zeros((1, 4, 33, 2))
   lane_stds = np.ones((1, 4, 33, 2))
   for i, off in enumerate((-1.5 * width, -width / 2, width / 2, 1.5 * width)):
@@ -102,6 +102,81 @@ class TestBlendful(OpenpilotTestCase):
     assert self.bf.curvature != 0.0
     assert self.bf.update(frame(center=0.5), 20.0, True, 0.0, enabled=False) == 0.0
     assert self.bf.curvature == 0.0 and self.bf.trust == 0.0
+
+  def test_wide_lines_hand_back_to_model(self):
+    """GS450h: 線の間隔が広い道 (センターラインの無い対面通行など) では真ん中へ引き戻さず、モデルの左寄りに任せる。"""
+    normal = drive(Blendful(), 8.0, center=0.6, width=3.5)[-1]
+    push = drive(self.bf, 8.0, center=0.6, width=4.6)  # 車は 2 本の真ん中より 0.6m 左
+    assert self.bf.trust < 1e-6 and abs(push[-1]) < 1e-4
+    # 線が立ち上がる最初の数フレーム (両側の確からしさ 0.2 未満 = 幅を見る前) の引きは普通の車線の数 % に留まる
+    assert np.abs(push).max() < 0.05 * normal
+
+  def test_wide_band_fades_partially(self):
+    full = Blendful()
+    drive(full, 8.0, center=0.4, width=3.8)
+    half = Blendful()
+    drive(half, 8.0, center=0.4, width=4.2)
+    assert full.trust > 0.9
+    assert 0.3 < half.trust < 0.7  # 4.0-4.4m の間で段階的に落とす
+
+  def test_highway_wide_lane_still_centers(self):
+    """3.75m 車線の幹線は 3.8-4.0m に出る (11-02 実測、77km/h)。そこは今までどおり中心へ寄せる。"""
+    push = drive(self.bf, 5.0, center=0.5, width=3.95)
+    assert self.bf.trust > 0.9 and push[-1] > 0.02
+
+  def test_wide_width_is_not_learned(self):
+    """広い道の幅を「普段の車線幅」として覚えると、片側の線だけのときに目標が右へずれる。"""
+    drive(self.bf, 30.0, width=3.2)
+    learned = self.bf.lane_width.x
+    drive(self.bf, 30.0, width=4.6)
+    assert abs(self.bf.lane_width.x - learned) < 1e-6
+
+  def test_heading_turns_back_toward_the_lane(self):
+    """GS450h: 高速で車線に対して斜めを向いていたら、向きを戻す側へすぐ足す (中心寄せのなまし 0.5 秒を通さない)。"""
+    v = 29.0
+    drive(self.bf, 5.0, v=v)
+    push = drive(self.bf, 0.5, v=v, slope=0.003)  # 右へ 0.17 度
+    assert push[-1] > 0.03  # 左 (+) へ戻す
+    assert self.bf.heading > 0
+    push = drive(self.bf, 1.0, v=v, slope=-0.003)
+    assert push[-1] < -0.03
+
+  def test_heading_is_only_for_highway_straights(self):
+    for kw in ({'v': 15.0}, {'v': 21.5}, {'v': 29.0, 'k': 0.0008}):  # 54km/h / 77km/h / 105km/h で 0.67 m/s^2 のカーブ
+      bf = Blendful()
+      drive(bf, 5.0, **kw)
+      drive(bf, 1.0, slope=0.003, **kw)
+      assert bf.heading == 0.0, kw
+
+  def test_heading_lets_go_with_trust(self):
+    v = 29.0
+    drive(self.bf, 5.0, v=v, slope=0.003)
+    assert self.bf.heading > 0
+    self.bf.update(frame(slope=0.003), v, False, 0.0)  # 車線変更中
+    assert self.bf.heading == 0.0
+    wide = Blendful()
+    drive(wide, 5.0, v=v, slope=0.003, width=4.6)
+    assert abs(wide.heading) < 1e-9
+
+  def test_highway_centering_ignores_a_wobbling_view(self):
+    """GS450h: 高速の直線では、線の見え方の 4 秒周期の揺らぎ (位置 ±10cm) を寄せ量に素通ししない。一定の片寄りはそのまま寄せる。"""
+    v = 29.0
+    def wobble(bf, v):
+      t = np.arange(int(20 / DT_MDL)) * DT_MDL
+      out = [bf.update(frame(center=0.3 + 0.1 * np.sin(2 * np.pi * 0.25 * s)), v, True, 0.0) for s in t]
+      return np.array(out[200:]) * v ** 2
+    hw = wobble(self.bf, v)
+    town = wobble(Blendful(), 18.0)  # 65km/h は今までどおり
+    assert hw.mean() > 0.02  # 0.3m の片寄りは寄せる
+    assert hw.std() < 0.5 * town.std()  # 揺らぎへの追従は半分以下 (寄せの横加速度は先読み距離で割るので速度によらない)
+    assert self.bf.dk_slow != self.bf.dk
+
+  def test_highway_yields_as_fast_as_before(self):
+    v = 29.0
+    drive(self.bf, 8.0, v=v)
+    push = drive(self.bf, 3.0, v=v, plan=0.8)
+    assert self.bf.going_around and self.bf.trust < 0.05
+    assert abs(push[-1]) < 0.01
 
   def test_fades_below_min_speed(self):
     drive(self.bf, 5.0, v=10.0, center=0.5)
