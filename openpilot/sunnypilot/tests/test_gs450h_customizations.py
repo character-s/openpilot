@@ -409,6 +409,20 @@ def test_more_aggressive_personality_survives():
   assert 'personality == log.LongitudinalPersonality.moreAggressive' in _read(LONG_PLANNER_PY)
 
 
+def test_every_personality_switch_handles_more_aggressive():
+  """11-06: upstream #2089 (accel_boost.get_boost_max) が 3 段だけで NotImplementedError を投げ、moreAggressive の c4 で
+  plannerd が起動直後に落ちた (engage 不可)。personality で分岐して投げる関数が上流で増えても拾えるよう、全部を見る。"""
+  raise_line = 'raise NotImplementedError("Longitudinal personality not supported")'
+  missing = []
+  for sub in ('openpilot/selfdrive', 'openpilot/sunnypilot'):
+    for path in (REPO_ROOT / sub).rglob('*.py'):
+      text = path.read_text(encoding='utf-8', errors='ignore')
+      n_raise = text.count(raise_line)
+      if n_raise and text.count('LongitudinalPersonality.moreAggressive') < n_raise:
+        missing.append(str(path.relative_to(REPO_ROOT)))
+  assert not missing, f'moreAggressive の分岐が足りない (plannerd などが NotImplementedError で落ちる): {missing}'
+
+
 def test_pln9_e2e_only_caps_when_decelerating():
   """PLN-9 (10-19 user 判断「B」): e2e は減速・停止したい場面だけ min の候補。加速は旧版テーブルの巡航候補で決める。
 

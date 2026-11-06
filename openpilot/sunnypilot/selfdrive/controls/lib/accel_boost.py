@@ -26,6 +26,8 @@ def get_boost_max(personality=log.LongitudinalPersonality.standard):
     return ACCEL_BOOST_MAX[1]
   elif personality == log.LongitudinalPersonality.aggressive:
     return ACCEL_BOOST_MAX[0]
+  elif personality == log.LongitudinalPersonality.moreAggressive:  # GS450h: 加減速の硬さは aggressive と同じ
+    return ACCEL_BOOST_MAX[0]
   else:
     raise NotImplementedError("Longitudinal personality not supported")
 
