@@ -68,7 +68,9 @@ STOP_DISTANCE = 6.0
 #   使うため obstacle 側は 0.5m ほど強く出る (sim: extra 2.0 -> 停止 5.89m、実測は約 0.7m 楽観)。
 # 前車が動いていれば 0 にフェード = 巡航の車間 (t_follow*v + STOP_DISTANCE) は変えない。
 # 実測と shadow = archive/probes/_stop_creep.py / _stop_mpc_sim.py。
-EXTRA_STOP_DISTANCE = 2.0
+# PLN-14 (11-13): 2.0 -> 1.0。longitudinal_planner の PLN-14 (止まり際は MPC を実速度から解く) で止まる位置が 0.75m 遠くなる分を戻す
+# (閉ループ sim、実走 105 停止: 停止車間 p50 今 4.87 / PLN-14 だけ 5.62 / これと合わせて 4.71m)。⚠ PLN-14 と対。片方だけ戻さないこと。
+EXTRA_STOP_DISTANCE = 1.0
 EXTRA_STOP_DISTANCE_BP = [1.0, 3.0]  # [m/s] 前車速度。この区間で全量 -> 0
 # GS450h (10-10): 上乗せは「走ってきて止まる」ときだけ。前回止まってから自車が一度も EGO_BP[1] まで
 # 出ていない (= 停止から前車に付いて少し進むだけ) なら 0 にフェードし、停止目標を STOP_DISTANCE (6m) に戻す。

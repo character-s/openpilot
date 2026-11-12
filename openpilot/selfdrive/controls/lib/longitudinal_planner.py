@@ -96,6 +96,20 @@ PLAN_GO_ACCEL = 0.5          # [m/s^2] 発進の加速度の下限 (穏やかに
 # 急な減速 (PLN-1_8 の門 E2E_ACCEL_PATH_GATE より深い)。⚠ 遠い赤信号への接近は、計画が止まりを描くまで A_CRUISE_MIN で減速する
 E2E_STOP_PLAN_V = 1.0        # [m/s] modelV2.velocity (~10s 先まで) の最小がこれ未満 = モデルは止まるつもり
 
+# GS450h PLN-14 (11-13, user 判断「実装する」): 停止車間のばらつきを減らす。上流は MPC を「計画上の速度」(v_desired_filter = 実速度へ
+# 2.0s で寄せつつ自分の目標加速度を積分した値) から解く。GS は低速の減速で車の減速が指令より浅く (v 1-2 m/s で +0.3 m/s^2、
+# carcontroller の PID は 0.1 前後のずれを埋めない)、計画速度が実速度より 0.24 m/s 低いまま止まりに行くので、その停止での車の効き具合と
+# 接近速度で止まる位置が動く。減速を計画している間の低速だけ実速度へ速く寄せる = MPC が実際の速度から解く。
+# 閉ループ sim (c4 /data/c4_probe/stop_sim.py = openpilot repo archive/probes/_stop_sim.py、現行コードの実走 105 停止を再現):
+#   停止車間 p10-p90 の幅 1.27 -> 1.06m、坂 1° あたり 7.1 -> 3.8cm、車の効き具合との相関 -0.45 -> -0.13、減速の硬さ (jerk p90) 1.50 -> 1.46。
+#   carcontroller の補正を強める案 (ki x4・積分の巻き戻し停止・feedforward) は止まる位置が 0.6-1.1m 遠くなるだけで幅は減らない。
+# ⚠ これだけだと止まる位置が 0.75m 遠くなる。long_mpc の EXTRA_STOP_DISTANCE を 2.0 -> 1.0 にして今の位置 (p50 4.9 -> 4.7m) に合わせてある。
+#   片方だけ戻さないこと。
+# ⚠ 加速・発進 (前回の目標 >= 0) と 29km/h 以上は上流のまま。sim で確かめたのは停止だけで、速度の計測ノイズは入れていない。
+V_DESIRED_RC = 2.0                    # [s] 上流の値
+V_DESIRED_RC_DECEL = 0.2              # [s] 減速を計画している間、V_DESIRED_RC_DECEL_BP[0] 以下で
+V_DESIRED_RC_DECEL_BP = [5.0, 8.0]    # [m/s] この区間で V_DESIRED_RC_DECEL -> V_DESIRED_RC
+
 
 def get_max_accel(v_ego, personality=log.LongitudinalPersonality.standard):
   max_accel = float(np.interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS))
@@ -122,6 +136,13 @@ def get_cruise_accel(v_cruise, v_ego, a_cruise_prev, dt, personality=log.Longitu
   return target_accel
 
 
+def get_v_desired_rc(v_ego, a_target_prev):
+  """PLN-14: 計画速度 (MPC の初期速度) を実速度へ寄せる時定数 [s]。"""
+  if a_target_prev >= 0.0:
+    return V_DESIRED_RC
+  return float(np.interp(v_ego, V_DESIRED_RC_DECEL_BP, [V_DESIRED_RC_DECEL, V_DESIRED_RC]))
+
+
 def e2e_wants_decel(v_ego, e2e_accel, e2e_should_stop, plan_v):
   """PLN-9: e2e を min の候補に入れるか (= モデルが減速・停止したい場面か)。"""
   if e2e_should_stop or e2e_accel < E2E_DECEL_GATE:
@@ -143,7 +164,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.dt = dt
     self.accel_boost = AccelBoost()
 
-    self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
+    self.v_desired_filter = FirstOrderFilter(init_v, V_DESIRED_RC, self.dt)
     self.e2e_path_accel = FirstOrderFilter(0.0, E2E_ACCEL_PATH_RC, self.dt)  # PLN-1_8
     self.e2e_gate_timer = 0.0  # PLN-9: e2e を候補に入れ続ける残り時間 [s]
     self.last_plan_source = LongitudinalPlanSource.cruise  # PLN-9: 前回 min を取った候補
@@ -178,6 +199,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       self.a_cruise = self.output_a_target
 
     # Prevent divergence, smooth in current v_ego
+    # PLN-14: 減速を計画している間の低速は実速度へ速く寄せる (self.output_a_target はここでは前回の目標)
+    self.v_desired_filter.update_alpha(get_v_desired_rc(v_ego, self.output_a_target))
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
 
     # No change cost when user is controlling the speed, or when standstill

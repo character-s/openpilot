@@ -476,6 +476,30 @@ def test_pln11_launch_and_nolead_decel():
          src.index('output_a_target_e2e = max(output_a_target_e2e, A_CRUISE_MIN)') < src.index('if e2e_wants_decel(')
 
 
+def test_pln14_stop_plans_from_real_speed():
+  """PLN-14 (11-13 user 判断「実装する」): 減速を計画している間の低速は、MPC の初期速度を実速度へ速く寄せる。
+
+  停止車間のばらつき対策。上流の 2.0s のままだと計画速度が実速度より 0.24 m/s 低いまま止まりに行き、その停止での車の効き具合と
+  接近速度で止まる位置が動く。閉ループ sim (実走 105 停止): 幅 (p10-p90) 1.27 -> 1.06m、坂 1° あたり 7.1 -> 3.8cm。
+  ⚠ EXTRA_STOP_DISTANCE 1.0 と対 (これだけだと 0.75m 遠くに止まる / EXTRA だけ 1.0 だと 1m 近くに止まる)。
+  ⚠ 加速・発進と 29km/h 以上は上流のまま (評価したのは停止だけ)。
+  """
+  src = _read(LONG_PLANNER_PY)
+  assert _literal(LONG_PLANNER_PY, 'V_DESIRED_RC') == 2.0, '加速・高速側は上流の値のまま'
+  assert 0.0 < _literal(LONG_PLANNER_PY, 'V_DESIRED_RC_DECEL') <= 0.5, '止まり際の時定数が範囲外 (sim は 0.2。0.5 で効果は約 7 割)'
+  assert _literal(LONG_PLANNER_PY, 'V_DESIRED_RC_DECEL_BP') == [5.0, 8.0], '低速だけに限る帯が変わった (sim で評価したのは停止だけ)'
+  fn = src[src.index('def get_v_desired_rc('):src.index('def e2e_wants_decel(')]
+  assert 'if a_target_prev >= 0.0:\n    return V_DESIRED_RC\n' in fn, '加速・発進まで実速度寄りになっている (未評価)'
+  # 時定数を切り替えてから寄せる。切り替えが落ちると上流の 2.0s に戻る
+  assert src.index('self.v_desired_filter.update_alpha(get_v_desired_rc(v_ego, self.output_a_target))') < \
+         src.index('self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))'), \
+    '時定数の切り替えが落ちた / 寄せた後に切り替えている'
+  assert 'self.mpc.set_cur_state(self.v_desired_filter.x, self.output_a_target)' in src, \
+    'MPC の初期速度が計画速度でなくなった (上流が変えたなら PLN-14 を見直す)'
+  assert _literal(LONG_MPC_PY, 'EXTRA_STOP_DISTANCE') == 1.0, \
+    'PLN-14 と対の停止目標の上乗せが 1.0 でない (2.0 のままだと 0.75m 遠くに止まる)'
+
+
 def test_tailscale_unit_restored_after_agnos_update():
   """AGNOS 更新で /etc の tailscaled unit が消える (08-25・09-04・10-19 の 3 回、10-19 は 19.7 -> 19.9)。
 
@@ -500,8 +524,10 @@ def test_pln1_7_extra_stop_distance_survives():
 
   STOP_DISTANCE がコンパイル時定数で動かせないための runtime 側の等価操作。
   ⚠ 前車速度でフェードするのが仕様 (常時掛けると巡航の車間まで伸びる)。
+  ⚠ 11-13: 2.0 -> 1.0。PLN-14 (止まり際は MPC を実速度から解く) で止まる位置が遠くなる分を戻した = PLN-14 と対
+     (test_pln14_stop_plans_from_real_speed が組み合わせを見張る)。
   """
-  assert _literal(LONG_MPC_PY, 'EXTRA_STOP_DISTANCE') == 2.0
+  assert _literal(LONG_MPC_PY, 'EXTRA_STOP_DISTANCE') == 1.0
   assert _literal(LONG_MPC_PY, 'EXTRA_STOP_DISTANCE_BP') == [1.0, 3.0]
   src = _read(LONG_MPC_PY)
   assert 'def get_extra_stop_distance' in src, 'get_extra_stop_distance が消えている'
