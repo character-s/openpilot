@@ -451,6 +451,13 @@ def test_pln10_plan_go_survives():
   assert 0.0 < _literal(LONG_PLANNER_PY, 'PLAN_GO_V') <= 0.3, '計画速度の閾値が範囲外 (0.1 で ed が救える、0.3 超は効果が減る)'
   assert _literal(LONG_PLANNER_PY, 'PLAN_GO_MAX_V') <= 3.0
   assert "not sm['radarState'].leadOne.present and sm['modelV2'].big" in src, 'lead なし・big の条件が落ちた'
+  # 11-21 Fable review: 停止から始まった低速区間だけ。外すと止まりに行く途中 (v < 3) でも止まれを外す
+  armed = (r"if sm\['carState'\]\.standstill:\s*\n\s*self\.plan_go_armed = True\s*\n" +
+           r"\s*elif v_ego >= PLAN_GO_MAX_V:\s*\n\s*self\.plan_go_armed = False")
+  assert re.search(armed, src), \
+    'PLN-10 の「一度止まってから」の門 (standstill で立て、PLAN_GO_MAX_V で下ろす) が崩れた'
+  assert re.search(r'if \(self\.plan_go_armed and v_ego < PLAN_GO_MAX_V', src), 'PLN-10 の発火条件が停止の門を見ていない'
+  assert 'self.plan_go_armed = False  #' in src, '__init__ で門を初期化していない'
   assert _literal(LONGCONTROL_PY, 'PLN3_GO_SUSTAIN_NOLEAD_BIG') >= 1.5, \
     'PLN-10 の持続確認は PLN-3 の lead なし sustain に依存している (下げると赤での誤発進が増える)'
 
@@ -1051,6 +1058,10 @@ def test_selfdrived_big_model_warmup_gate_survives():
   assert 'warmup_sec = 5.' not in src, 'upstream のローカル定数に戻っている = GS の窓が消えた'
   assert re.search(r'big_model_settling\s*=\s*warming_up\s+and\s+not\s+self\.enabled', src), \
     '安全チェック免除が engage 中にも効いてしまう (not self.enabled が落ちた) か、NO_ENTRY の窓と別式になっている'
+  # 11-21 Fable review: self.enabled は縦だけ。MADS 横のみで modeld が落ちると、big_failed の立ち上がりで窓が張り直され
+  # commIssue も model_unavailable も黙ったまま凍った desiredCurvature で横が走る
+  assert re.search(r'big_model_settling\s*=\s*warming_up\s+and\s+not\s+self\.enabled\s+and\s+not\s+self\.mads\.active', src), \
+    'MADS の横だけ engage 中にも安全チェックが免除される'
   assert re.search(r'warming_up\s*=\s*self\.big_model_loading\s+or\s+time\.monotonic\(\)\s*<\s*self\.big_model_ready_t\s*\+\s*BIG_MODEL_WARMUP', src), \
     'warmup 窓の NO_ENTRY (bigModelLoading の延長) が落ちている'
   # Ready 音: ロード完了の瞬間 (upstream) ではなく、announced フラグ付きの elif で鳴らす

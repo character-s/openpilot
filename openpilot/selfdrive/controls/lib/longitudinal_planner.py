@@ -168,6 +168,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.e2e_path_accel = FirstOrderFilter(0.0, E2E_ACCEL_PATH_RC, self.dt)  # PLN-1_8
     self.e2e_gate_timer = 0.0  # PLN-9: e2e を候補に入れ続ける残り時間 [s]
     self.last_plan_source = LongitudinalPlanSource.cruise  # PLN-9: 前回 min を取った候補
+    self.plan_go_armed = False  # PLN-10: 停止してから PLAN_GO_MAX_V を超えるまで True
     self.a_cruise = init_a
     self.output_a_target = init_a
     self.output_should_stop = False
@@ -248,8 +249,15 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
         output_a_target_e2e = max(min(output_a_target_e2e, self.e2e_path_accel.x), E2E_ACCEL_PATH_FLOOR)
 
     # PLN-10: lead なしの停止で、計画は動いたのに action が止まれのまま → e2e の止まれを外して穏やかに出す
+    # ⚠ 停止から始まった低速区間だけ (11-21 Fable review)。v < PLAN_GO_MAX_V だけだと、止まりに行く途中 (減速して 11km/h を
+    #   割ったところ) でも計画速度が 0.1 を超えていれば止まれを外してしまう。一度止まったら PLAN_GO_MAX_V を超えるまで有効
+    #   (発進直後に計画速度が 1 フレーム揺れても切れないように、揺れでは解除しない)
+    if sm['carState'].standstill:
+      self.plan_go_armed = True
+    elif v_ego >= PLAN_GO_MAX_V:
+      self.plan_go_armed = False
     plan_v = sm['modelV2'].velocity.x
-    if (v_ego < PLAN_GO_MAX_V and not sm['radarState'].leadOne.present and sm['modelV2'].big
+    if (self.plan_go_armed and v_ego < PLAN_GO_MAX_V and not sm['radarState'].leadOne.present and sm['modelV2'].big
             and len(plan_v) > PLAN_GO_IDX and plan_v[PLAN_GO_IDX] > PLAN_GO_V):
       output_should_stop_e2e = False
       output_a_target_e2e = max(output_a_target_e2e, PLAN_GO_ACCEL)

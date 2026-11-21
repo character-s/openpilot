@@ -497,7 +497,10 @@ class SelfdriveD:
     has_disable_events = self.events.contains(ET.NO_ENTRY) and (self.events.contains(ET.SOFT_DISABLE) or self.events.contains(ET.IMMEDIATE_DISABLE))
     no_system_errors = (not has_disable_events) or (len(self.events) == num_events)
     # GS450h: 免除は非 engage 時だけ (engage 中まで免除すると上の warmup 窓と同じ穴が開く)
-    big_model_settling = warming_up and not self.enabled
+    # ⚠ self.enabled は縦 (ACC) の engage だけ。MADS の横だけ engage も engage として扱う (11-21 Fable review)。
+    #   modeld が落ちると big_failed の立ち上がりで warmup 窓が張り直され、model_unavailable も 5 秒黙るので、
+    #   免除に MADS を含めないと commIssue も出ず、凍った desiredCurvature で横が走り続ける。
+    big_model_settling = warming_up and not self.enabled and not self.mads.active
     # GS450h PLN-15: 全部 alive かつ周期 OK で、COMM_INVALID_DEBOUNCE_SERVICES の valid だけ落ちている
     # = PLN-7 と同じ「modeld の 1 フレーム欠け」の波及。1 枚欠けると cameraOdometry → extrinsicsCalibration /
     # driverMonitoringState / lateralDelay / vehicleParameters / lateralTorqueParameters が 0.25-0.3 秒だけ valid=0 になり、
