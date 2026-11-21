@@ -72,6 +72,31 @@ BIG_MODEL_WARMUP = 5.
 # ⚠ soft disable 自体が 3 秒のカウントダウンを持つため、0.6 秒の遅延は安全側を実質損なわない。
 LOCALIZATION_DEBOUNCE_FRAMES = int(0.6 / DT_CTRL)
 
+# GS450h PLN-15: 1 フレーム欠けの波及で valid だけ落ちるサービス。commIssue の debounce はこの集合に限る
+# (cameraOdometry → calibrationd → lagd → torqued と、locationd / paramsd / dmonitoringd)。
+# ⚠ それ以外 (pandaStates / longitudinalPlan / controlsState など) の valid 落ちは今までどおり即 commIssue。
+COMM_INVALID_DEBOUNCE_SERVICES = frozenset({'extrinsicsCalibration', 'lateralDelay', 'lateralTorqueParameters',
+                                            'deviceMotion', 'vehicleParameters', 'driverMonitoringState'})
+# 窓: calibrationd / lagd / torqued は 4Hz (sm.frame % 5) の 3 段なので、位相が悪いブートでは
+# 波及が理論上最大 0.75 秒まで延びる (PLN-7 の 0.6 秒では漏れる)。実測 (archive/probes/_invalid_span.py、
+# route 140-14e): 集合内だけの NG は 516 / 621 / 708ms の 3 回で 0.6 秒超えが 2 回、0.8 秒超えは 0。
+COMM_INVALID_DEBOUNCE_FRAMES = int(0.8 / DT_CTRL)
+
+
+def comm_issue_event(all_alive: bool, all_freq_ok: bool, invalid: set[str], frames: int):
+  """catch-all の commIssue を決める (GS450h PLN-15)。返り値は (イベント or None, 新しいカウンタ)。
+  alive / 周期 / 集合外の invalid は即発火し、カウンタを窓の外にラッチする
+  (復帰直後に valid だけ残っても窓を数え直さない = アラートに穴を開けない)。"""
+  latched = COMM_INVALID_DEBOUNCE_FRAMES + 1
+  if not all_alive:
+    return EventName.commIssue, latched
+  if not all_freq_ok:
+    return EventName.commIssueAvgFreq, latched
+  if not invalid <= COMM_INVALID_DEBOUNCE_SERVICES:
+    return EventName.commIssue, latched
+  frames += 1
+  return (EventName.commIssue if frames > COMM_INVALID_DEBOUNCE_FRAMES else None), frames
+
 
 class SelfdriveD:
   def __init__(self, CP=None, CP_SP=None):
@@ -161,6 +186,8 @@ class SelfdriveD:
     self.posenet_invalid_frames = 0
     self.locationd_invalid_frames = 0
     self.paramsd_invalid_frames = 0
+    # GS450h PLN-15: valid だけ落ちた commIssue の連続フレーム数 (窓は COMM_INVALID_DEBOUNCE_FRAMES)
+    self.comm_invalid_frames = 0
     self.not_running_prev = None
     self.personality = get_sanitize_int_param(
       "LongitudinalPersonality",
@@ -471,18 +498,31 @@ class SelfdriveD:
     no_system_errors = (not has_disable_events) or (len(self.events) == num_events)
     # GS450h: 免除は非 engage 時だけ (engage 中まで免除すると上の warmup 窓と同じ穴が開く)
     big_model_settling = warming_up and not self.enabled
-    if not self.sm.all_checks() and no_system_errors and not big_model_settling:  # the load holds modelV2 and friends back on purpose
-      if not self.sm.all_alive():
-        self.events.add(EventName.commIssue)
-      elif not self.sm.all_freq_ok():
-        self.events.add(EventName.commIssueAvgFreq)
-      else:
-        self.events.add(EventName.commIssue)
+    # GS450h PLN-15: 全部 alive かつ周期 OK で、COMM_INVALID_DEBOUNCE_SERVICES の valid だけ落ちている
+    # = PLN-7 と同じ「modeld の 1 フレーム欠け」の波及。1 枚欠けると cameraOdometry → extrinsicsCalibration /
+    # driverMonitoringState / lateralDelay / vehicleParameters / lateralTorqueParameters が 0.25-0.3 秒だけ valid=0 になり、
+    # ここで commIssue (softDisabling = 「TAKE CONTROL IMMEDIATELY」+ warningSoft 約 2 秒、engage は戻る) が鳴っていた
+    # (11-20〜21 route 155/156/157 で実測、swaglog の invalid 列で確認)。判定は comm_issue_event。
+    # ⚠ カウンタは「valid だけの NG が何フレーム続いたか」。他の disable イベントで発火を止めている間も数える
+    #   (止めていた間に 0 に戻すと、そのイベントが消えた直後に窓の分だけ穴が開く)。0 に戻すのは checks が通ったときだけ。
+    comm_ok = self.sm.all_checks()
+    comm_event = None
+    if comm_ok or big_model_settling:
+      self.comm_invalid_frames = 0
+    else:
+      invalid = {s for s, valid in self.sm.valid.items() if not valid and s not in self.sm.ignore_valid}
+      comm_event, self.comm_invalid_frames = comm_issue_event(self.sm.all_alive(), self.sm.all_freq_ok(), invalid,
+                                                              self.comm_invalid_frames)
+    if not comm_ok and no_system_errors and not big_model_settling:  # the load holds modelV2 and friends back on purpose
+      if comm_event is not None:
+        self.events.add(comm_event)
 
       logs = {
         'invalid': [s for s, valid in self.sm.valid.items() if not valid],
         'not_alive': [s for s, alive in self.sm.alive.items() if not alive],
         'not_freq_ok': [s for s, freq_ok in self.sm.freq_ok.items() if not freq_ok],
+        # 窓の中で握りつぶしている間は True。窓を越えて発火した時点で False になり、変化として 1 回ログに出る
+        'suppressed': comm_event is None,
       }
       if logs != self.logged_comm_issue:
         cloudlog.event("commIssue", error=True, **logs)

@@ -1102,6 +1102,73 @@ def test_selfdrived_localization_debounce_survives():
     '免除中のカウンタリセットが無い = 免除が明けた瞬間に溜まった分で即発火する'
 
 
+def _load_comm_issue_event():
+  """selfdrived を import せず (PC では cereal が無い) comm_issue_event と定数だけを取り出して実行する。"""
+  import ast
+  import types
+  tree = ast.parse(_read(SELFDRIVED_PY))
+  want = {'COMM_INVALID_DEBOUNCE_SERVICES', 'COMM_INVALID_DEBOUNCE_FRAMES', 'comm_issue_event'}
+  nodes = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in want) or
+           (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in want for t in n.targets))]
+  assert len(nodes) == 3, 'comm_issue_event / COMM_INVALID_DEBOUNCE_* がモジュール直下に無い'
+  ns = {'EventName': types.SimpleNamespace(commIssue='commIssue', commIssueAvgFreq='commIssueAvgFreq'), 'DT_CTRL': 0.01}
+  exec(compile(ast.Module(body=nodes, type_ignores=[]), SELFDRIVED_PY, 'exec'), ns)
+  return ns
+
+
+def test_selfdrived_comm_issue_invalid_debounce_survives():
+  """PLN-15 (11-21): 1 フレーム欠けの波及で valid だけ落ちた commIssue を窓で握りつぶす。
+
+  ⚠ modeld が 1 フレーム落とす (exec スパイク / `frames out of sync`) と cameraOdometry →
+  extrinsicsCalibration / driverMonitoringState / lateralDelay / vehicleParameters / lateralTorqueParameters
+  が valid=0 になり、upstream の catch-all が即 commIssue (softDisabling + warningSoft 約 2 秒) を出す。
+  engage は戻るので音と表示だけの偽アラート (route 155/156/157 で実測)。
+  ⚠ 4Hz の 3 段連鎖なので最悪 0.75 秒 (実測最大 708ms、route 14c) ⇒ 窓は 0.8 秒。PLN-7 の 0.6 秒では漏れる。
+  ⇒ alive / 周期 / 集合外の invalid は即、集合内の valid だけの NG は窓を超えたときだけ上げる。
+  """
+  ns = _load_comm_issue_event()
+  f, window, chain = ns['comm_issue_event'], ns['COMM_INVALID_DEBOUNCE_FRAMES'], ns['COMM_INVALID_DEBOUNCE_SERVICES']
+  assert window >= 76, f'窓 {window} フレームは 4Hz 3 段連鎖の最悪 0.75 秒より短い'
+  assert window <= 100, f'窓 {window} フレームは長すぎる (soft disable の 3 秒に食い込む)'
+  assert chain == {'extrinsicsCalibration', 'lateralDelay', 'lateralTorqueParameters', 'deviceMotion',
+                   'vehicleParameters', 'driverMonitoringState'}, '対象集合が変わった。広げるなら安全側を見直すこと'
+
+  # 集合内だけの NG: window フレームまでは黙り、window + 1 で発火
+  frames = 0
+  for _ in range(window):
+    ev, frames = f(True, True, {'extrinsicsCalibration', 'lateralDelay'}, frames)
+    assert ev is None
+  ev, frames = f(True, True, {'lateralDelay'}, frames)
+  assert ev == 'commIssue'
+
+  # alive / 周期 / 集合外は即発火
+  assert f(False, True, set(), 0)[0] == 'commIssue'
+  assert f(True, False, set(), 0)[0] == 'commIssueAvgFreq'
+  assert f(True, True, {'pandaStates'}, 0)[0] == 'commIssue', 'panda の comms_healthy 落ちまで遅らせている'
+  assert f(True, True, {'lateralDelay', 'longitudinalPlan'}, 0)[0] == 'commIssue'
+
+  # alive 異常から復帰して valid だけ残っても、窓を数え直さず鳴り続ける (アラートに穴を開けない)
+  _, frames = f(False, True, {'lateralDelay'}, 0)
+  assert f(True, True, {'lateralDelay'}, frames)[0] == 'commIssue'
+
+  src = _read(SELFDRIVED_PY)
+  assert re.search(r'comm_event, self\.comm_invalid_frames = comm_issue_event\(', src), '本体から comm_issue_event を呼んでいない'
+  assert re.search(r'if comm_ok or big_model_settling:\s*\n\s*self\.comm_invalid_frames = 0', src), \
+    'カウンタのリセット条件が変わった (他の disable イベント中に 0 に戻すと窓の分だけ穴が開く)'
+  assert "'suppressed': comm_event is None" in src, 'swaglog の commIssue に suppressed が無い (発火の変化がログに出ない)'
+
+
+def test_modeld_frame_drop_diag_survives():
+  """PLN-15 診断 (11-21): フレーム欠けの瞬間に直前 8 周の内訳を swaglog `modeld_frame_drop` に残す。
+  欠けの出どころ (model.run 内 / modeld の遅れ / カメラの遅れ) は rlog だけでは分からないため。"""
+  src = _read('openpilot/sunnypilot/modeld_v2/modeld.py')
+  assert 'class FrameDropDiag' in src and 'cloudlog.event("modeld_frame_drop"' in src
+  assert re.search(r'self\.run_stages = \(', src), 'model.run の段階別時間が消えている'
+  assert re.search(r'drop_diag\.record\(', src) and re.search(r'drop_diag\.maybe_log\(', src), '本体ループから呼ばれていない'
+  assert 'time.CLOCK_BOOTTIME' not in src.replace("getattr(time, 'CLOCK_BOOTTIME'", ''), \
+    'time.CLOCK_BOOTTIME の直参照 (Linux 専用、PC で modeld を回すと落ちる)'
+
+
 def test_modeld_restart_on_crash_survives():
   """08-29/08-30: chestnut の GPU ハングで modeld が落ちたら manager が再起動する (big のまま復帰)。
 

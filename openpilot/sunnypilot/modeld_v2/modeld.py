@@ -6,6 +6,7 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 
+from collections import deque
 from collections.abc import Callable
 from functools import partial
 import gc
@@ -197,6 +198,63 @@ class FrameMeta:
       self.frame_id, self.timestamp_sof, self.timestamp_eof = vipc.frame_id, vipc.timestamp_sof, vipc.timestamp_eof
 
 
+# CLOCK_BOOTTIME は Linux 専用。PC で modeld を回しても落ちないよう MONOTONIC に逃がす (lat の値は実機でだけ意味がある)
+CLOCK_BOOTTIME = getattr(time, 'CLOCK_BOOTTIME', time.CLOCK_MONOTONIC)
+
+
+class FrameDropDiag:
+  """GS450h PLN-15 診断: フレームが欠けた瞬間の直前数周の内訳を swaglog (event "modeld_frame_drop") に残す。
+
+  欠けの出どころは 3 つあり、rlog だけでは区別できない (11-21 調査):
+    a) model.run の中で止まる (exec 100-300ms のスパイク) → copy / enqueue / sync のどこで止まったか
+    b) model.run の外で modeld が遅れる (前の周の post や loop が長い = GC・CPU 取り合い)
+    c) カメラ側の遅れ (lat = 受信時刻 - eof が大きい / wide だけ遅れて `frames out of sync`)
+  欠けた周か exec > 100ms の周だけ記録 (最大 1 回/秒) なので平常時の負担は perf_counter 数回だけ。
+  exec は平常 28ms 前後 (11-21 route 150-157) なので 100ms を越えるのはスパイクだけ。
+
+  列 (時間は ms):
+    wait_main / wait_extra = 周の頭から main 受信まで / main 受信から extra 受信まで
+    lat_* = 受信時刻 - そのフレームの eof (CLOCK_BOOTTIME)。sof_diff = main.sof - extra.sof
+    copy / enqueue / cb = model.run の中の内訳。exec のうちこの 3 つ以外が GPU 待ち
+    other = extra 受信から周の終わりまでのうち exec 以外 (sm.update・params 読み・warp・publish)
+    loop = 前の周の頭からこの周の頭まで = **前の周の全長** (前の周の cloudlog も含む)
+  skipped = 前回の event 以降に 1 秒制限で出さなかった回数。
+  """
+  FIELDS = ('fid_main', 'fid_extra', 'n_main', 'n_extra', 'wait_main', 'wait_extra', 'lat_main', 'lat_extra',
+            'sof_diff', 'copy', 'enqueue', 'cb', 'exec', 'other', 'loop')
+
+  def __init__(self, maxlen: int = 8):
+    self.hist: deque = deque(maxlen=maxlen)
+    self.last_log = 0.
+    self.skipped = 0
+    self.t_loop_prev = time.perf_counter()
+
+  @staticmethod
+  def _ms(s: float) -> float:
+    return round(s * 1000, 1)
+
+  def record(self, t_loop: float, t_main: float, t_extra: float, t_boot_main: int, t_boot_extra: int, n_main: int, n_extra: int,
+             meta_main: FrameMeta, meta_extra: FrameMeta, stages: tuple[float, float, float], exec_s: float, t_end: float) -> None:
+    ms = self._ms
+    self.hist.append((meta_main.frame_id, meta_extra.frame_id, n_main, n_extra, ms(t_main - t_loop), ms(t_extra - t_main),
+                      round((t_boot_main - meta_main.timestamp_eof) / 1e6, 1), round((t_boot_extra - meta_extra.timestamp_eof) / 1e6, 1),
+                      round((meta_main.timestamp_sof - meta_extra.timestamp_sof) / 1e6, 1),
+                      ms(stages[0]), ms(stages[1]), ms(stages[2]), ms(exec_s), ms(t_end - t_extra - exec_s), ms(t_loop - self.t_loop_prev)))
+    self.t_loop_prev = t_loop
+
+  def maybe_log(self, dropped: int, out_of_sync: bool, exec_s: float) -> None:
+    if not (dropped > 0 or out_of_sync or exec_s > 0.1):
+      return
+    now = time.monotonic()
+    if now - self.last_log < 1.:
+      self.skipped += 1
+      return
+    self.last_log = now
+    cloudlog.event("modeld_frame_drop", dropped=dropped, out_of_sync=out_of_sync, exec_ms=self._ms(exec_s),
+                   skipped=self.skipped, fields=self.FIELDS, hist=list(self.hist))
+    self.skipped = 0
+
+
 class ModelState(ModelStateBase):
   inputs: dict[str, np.ndarray]
   prev_desire: np.ndarray
@@ -275,7 +333,9 @@ class ModelState(ModelStateBase):
   def run(self, bufs: dict[str, VisionBuf], transforms: dict[str, np.ndarray],
           inputs: dict[str, np.ndarray],
           after_enqueue: Callable[[], None] | None = None) -> dict[str, np.ndarray] | None:
+    t_run0 = time.perf_counter()
     self.adapter.copy_frames(bufs)
+    t_copy = time.perf_counter()
 
     desire_key = self.desire_key
     inputs[desire_key][0] = 0
@@ -296,11 +356,14 @@ class ModelState(ModelStateBase):
       self.numpy_inputs['big_tfm'][:, :] = transforms[self._wide_key].reshape(3, 3)
 
     raw_outputs = self.adapter.run()
+    t_enqueue = time.perf_counter()
     if self.chestnut and (err := Device[self.DEV].error_state.host.view(fmt='q')[0]):
       raise RuntimeError(f"chestnut failed with {err}")
 
     if after_enqueue is not None:
       after_enqueue()
+    # GS450h PLN-15 診断: (copy, enqueue, after_enqueue)。残り = exec - 合計 が GPU 待ち (numpy) + parse
+    self.run_stages = (t_copy - t_run0, t_enqueue - t_copy, time.perf_counter() - t_enqueue)
 
     if self._combined_model_type == 'supercombo':
       model_output = raw_outputs.numpy().flatten()
@@ -521,24 +584,32 @@ def main(demo=False):
   RELC = RoadEdgeLaneChangeController()
   blendful = Blendful()
   blendful_enabled = False
+  drop_diag = FrameDropDiag()
 
   while True:
+    t_loop = time.perf_counter()
+    n_main = n_extra = 0
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
     while meta_main.timestamp_sof < meta_extra.timestamp_sof + 25000000:
       buf_main = vipc_client_main.recv()
       meta_main = FrameMeta(vipc_client_main)
+      n_main += 1
       if buf_main is None:
         break
+    t_main = time.perf_counter()
+    t_boot_main = time.clock_gettime_ns(CLOCK_BOOTTIME)  # frame の sof/eof と同じ時計 (nanos_since_boot)
 
     if buf_main is None:
       cloudlog.debug("vipc_client_main no frame")
       continue
 
+    out_of_sync = False
     if use_extra_client:
       # Keep receiving extra frames until frame id matches main camera
       while True:
         buf_extra = vipc_client_extra.recv()
         meta_extra = FrameMeta(vipc_client_extra)
+        n_extra += 1
         if buf_extra is None or meta_main.timestamp_sof < meta_extra.timestamp_sof + 25000000:
           break
 
@@ -547,6 +618,7 @@ def main(demo=False):
         continue
 
       if abs(meta_main.timestamp_sof - meta_extra.timestamp_sof) > 10000000:
+        out_of_sync = True
         cloudlog.error(f"frames out of sync! main: {meta_main.frame_id} ({meta_main.timestamp_sof / 1e9:.5f}),\
                        extra: {meta_extra.frame_id} ({meta_extra.timestamp_sof / 1e9:.5f})")
 
@@ -554,6 +626,8 @@ def main(demo=False):
       # Use single camera
       buf_extra = buf_main
       meta_extra = meta_main
+    t_extra = time.perf_counter()
+    t_boot_extra = time.clock_gettime_ns(CLOCK_BOOTTIME)
 
     sm.update(0)
     desire = DH.desire
@@ -661,6 +735,11 @@ def main(demo=False):
       pm.send('cameraOdometry', posenet_send)
       pm.send('modelDataV2SP', mdv2sp_send)
     last_vipc_frame_id = meta_main.frame_id
+    # GS450h PLN-15 診断 (publish の後なので出力は遅らせない)
+    drop_diag.record(t_loop, t_main, t_extra, t_boot_main, t_boot_extra, n_main, n_extra, meta_main, meta_extra,
+                     getattr(model, 'run_stages', (0., 0., 0.)), model_execution_time, time.perf_counter())
+    if run_count > 10:  # 起動直後の warmup (exec が長い・欠けを数えない窓) は記録しない
+      drop_diag.maybe_log(vipc_dropped_frames, out_of_sync, model_execution_time)
 
 if __name__ == "__main__":
   try:
