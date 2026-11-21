@@ -46,8 +46,6 @@ TORQUE_EXT_BASE_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/latcontrol_tor
 SCC_VISION_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/smart_cruise_control/vision_controller.py'
 FETCHER_PY = 'openpilot/sunnypilot/models/fetcher.py'
 SCC_MAP_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/smart_cruise_control/map_controller.py'
-LC_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/lane_centering.py'
-LC_PARAMS_PY = 'openpilot/sunnypilot/selfdrive/controls/lib/lane_centering_params.py'
 MICI_MODELS_PY = 'openpilot/selfdrive/ui/sunnypilot/mici/layouts/models.py'
 MICI_TOGGLES_PY = 'openpilot/selfdrive/ui/mici/layouts/settings/toggles.py'
 MICI_PERSONALITY_PY = 'openpilot/selfdrive/ui/mici/widgets/personality.py'
@@ -648,74 +646,6 @@ def test_gs_f_nnlc_model_is_present():
   assert path.stat().st_size > 0
 
 
-def test_lane_centering_tuning_survives():
-  """Lane Centering。⚠ 定数は全部 StarPilot 既定のまま = 3 つ変えたが実測で全部戻した。
-
-  挙動そのものは test_lane_centering.py が見ている。ここは**載り漏れ検出**だけ。
-  """
-  assert _literal(LC_PY, '_MAX_OFFSET') == 0.3
-  assert _literal(LC_PY, '_MAX_RAW_CORRECTION') == 0.004
-  assert _literal(LC_PY, '_MAX_GAIN') == 0.30
-  assert _literal(LC_PY, '_SMOOTH_TAU') == 0.4
-  assert _literal(LC_PY, '_MIN_LANE_WIDTH') == 2.6
-  assert _literal(LC_PY, '_MAX_LANE_WIDTH') == 4.8
-  assert _literal(LC_PY, '_WIDTH_JUMP_LIMIT') == 0.50, '幅急変ガード (GS 独自の追加) が落ちている'
-
-
-def test_lane_centering_lowspeed_schedule_survives():
-  """渋滞・低速で左に寄るため、低速帯だけ不感帯と先読みを詰めるスケジュール。ここは値の存在だけ見る。"""
-  assert _literal(LC_PY, '_MIN_V_EGO') == 2.5, '有効下限が 5.0 (18km/h) に戻っている = 渋滞帯で LC が効かない'
-  assert _literal(LC_PY, '_LOWSPEED_V') == (8.0, 12.5)
-  assert _literal(LC_PY, '_LOWSPEED_GAIN') == 1.0
-  assert _literal(LC_PY, '_LOWSPEED_DEADBAND') == 0.04
-  assert _literal(LC_PY, '_LOWSPEED_LOOKAHEAD_MIN') == 6.0
-  assert re.search(r'_LOWSPEED_V\b', _read(LC_PY).split('_LOWSPEED_V =', 1)[1]), \
-    '_LOWSPEED_V が定義されているだけで使われていない = 定数だけ載って本体が落ちた'
-
-
-
-def test_lane_centering_highspeed_schedule_survives():
-  """高速 (61-79km/h) だけゲインを上げ、同じ区間で authority の引っ込めを外すスケジュール (09-16 追加)。
-
-  ⚠ **既定は x2.0 (user 09-16 決定)**。⚠⚠ **standard (0.30) = 従来と 1 bit も同じ状態へ戻す退避先**が
-  選択肢から消えていないことを固定する (実走で悪かったときに UI だけで戻せることが要)。
-  """
-  assert _literal(LC_PY, '_HIGHSPEED_V') == (17.0, 22.0)
-  assert _literal(LC_PY, '_MAX_HIGHSPEED_GAIN') == 0.80
-  assert _literal(LC_PY, '_HIGHSPEED_AUTHORITY_SCALE') == 0.0
-  assert _literal(LC_PARAMS_PY, 'HIGHSPEED_GAIN_CHOICES') == (0.30, 0.45, 0.60, 0.80)
-  assert _literal(LC_PARAMS_PY, 'KEY_HIGHSPEED_GAIN') == 'LaneCenteringHighSpeedGain'
-  assert _literal(LC_PY, '_MAX_GAIN') in _literal(LC_PARAMS_PY, 'HIGHSPEED_GAIN_CHOICES'), 'standard (従来と同一) へ戻す選択肢が消えている'
-  src = _read(LC_PY)
-  assert '_authority_scale_for(v_ego, highspeed_gain)' in src,     'authority の速度スケジュールが呼ばれていない = 定数だけ載って本体が落ちた'
-  assert '_gain_for(v_ego, highspeed_gain, midspeed_gain)' in src,     'ゲインに設定値が渡っていない = 高速/中速スケジュールが死んでいる'
-  # 09-24: 高速の不感帯を強くしたときだけ下げる。平衡点が 0.08 の床に張り付いていたため。
-  # 10-05 user 決定: x2.0 (0.60) = 0.06 / x2.7 (0.80) = 0.04。
-  assert _literal(LC_PY, '_HIGHSPEED_DEADBAND_GAINS') == (0.30, 0.60, 0.80)
-  assert _literal(LC_PY, '_HIGHSPEED_DEADBAND') == (0.08, 0.06, 0.04)
-  assert '_deadband_for(v_ego, highspeed_gain, midspeed_gain)' in src, '不感帯に設定値が渡っていない = 高速/中速の不感帯が死んでいる'
-  assert 'KEY_HIGHSPEED_GAIN' in _read(MICI_TOGGLES_PY), 'UI に高速強度の行が載っていない'
-
-
-def test_lane_centering_midspeed_and_one_line_survive():
-  """10-10 追加: 中速 (45-61km/h) の強さと片側補完 (+ 短い途切れの保持)。ここは載り漏れ検出だけ。
-
-  ⚠ どちらも **standard / OFF で従来と 1 bit も同じ**に戻せることが要 (UI だけで退避できる)。
-  """
-  assert _literal(LC_PY, '_MAX_MIDSPEED_GAIN') == 0.60
-  assert _literal(LC_PARAMS_PY, 'MIDSPEED_GAIN_CHOICES') == (0.30, 0.45, 0.60)
-  assert _literal(LC_PARAMS_PY, 'KEY_MIDSPEED_GAIN') == 'LaneCenteringMidSpeedGain'
-  assert _literal(LC_PARAMS_PY, 'KEY_ONE_LINE') == 'LaneCenteringOneLine'
-  assert _literal(LC_PY, '_ONE_SIDED_MAX_STD') == 0.2
-  assert _literal(LC_PY, '_ONE_SIDED_GAIN_SCALE') == 0.5
-  assert _literal(LC_PY, '_LINE_JUMP_LIMIT') == 0.50, '片側補完中の跳びガードが落ちている'
-  src = _read(LC_PY)
-  assert '_one_sided_side(' in src and '_update_width_from_noisy_line(' in src, '片側補完の本体が落ちた'
-  toggles = _read(MICI_TOGGLES_PY)
-  assert 'KEY_MIDSPEED_GAIN' in toggles, 'UI に中速強度の行が載っていない'
-  assert 'KEY_ONE_LINE' in toggles, 'UI に片側補完のトグルが載っていない'
-
-
 # ===========================================================================
 # 4) modeld (chestnut / eGPU)
 # ===========================================================================
@@ -799,50 +729,18 @@ def test_model_selector_shows_every_folder():
     'models 画面がフォルダのホワイトリストに戻っている = 大半のモデルが選べない'
 
 
-def test_lane_centering_ui_is_wired_into_settings():
-  """設定画面に Lane Centering が並んでいること (10-19: DEC は upstream #2056 で廃止、トグルも外した)。"""
-  src = _read(MICI_TOGGLES_PY)
-  assert 'lane_centering' in src, 'mici の設定に Lane Centering が載っていない'
-  assert '*self._lane_centering_details' in src, 'Lane Centering の詳細設定が画面に並んでいない'
+def test_lane_centering_stays_removed():
+  """11-22: Lane Centering (StarPilot 由来の幾何補正) は削除した (user「Blendful が優秀だからもういらない」、c4 でも OFF だった)。
 
-
-# ===========================================================================
-# 6) Lane Centering の保存先 (params から切り離した設計)
-# ===========================================================================
-
-LC_KEYS = ['LaneCentering', 'LaneCenterOffset', 'LaneCenteringE2EAuthority', 'LaneCenteringPauseOnSignal',
-           'LaneCenteringHighSpeedGain', 'LaneCenteringMidSpeedGain', 'LaneCenteringOneLine']
-
-
-def test_lane_centering_keys_are_not_declared_in_params_keys_h():
-  """⚠ ここに載せると `.so` を焼き直さない限り実機で UnknownKeyName になる。
-
-  焼く運用は 2026-08-27 に捨てた。⇒ 二度と載せない。
+  追従の衝突解決で配線だけ戻ると、消した module を import して controlsd / UI が起動時に落ちる。
   """
-  src = _read(PARAMS_KEYS_H)
-  leaked = [k for k in LC_KEYS if k in src]
-  assert not leaked, f"params_keys.h に {leaked} が戻っている。焼かないと実機で読めなくなる"
-
-
-def test_lane_centering_save_location_is_outside_openpilot_params():
-  """⚠ `/data/params/` の下に戻すと `clearAll` が毎ブート消す (manager が起動時に 4 回呼ぶ)。"""
-  m = re.search(r"^PARAM_DIR\s*=\s*['\"]([^'\"]+)['\"]", _read(LC_PARAMS_PY), re.MULTILINE)
-  assert m, 'lane_centering_params.py に PARAM_DIR が無い'
-  assert not m.group(1).startswith('/data/params/'), \
-    f"PARAM_DIR が {m.group(1)} = openpilot の params 配下に戻っている。clearAll に毎ブート消される"
-
-
-def test_lane_centering_read_does_not_take_a_params_object():
-  """⚠ `.so` を焼いた端末では Params.get(..., return_default=True) が**必ず既定値を返す**。
-
-  Params を先に見る実装だと**ファイルの値が黙って無視される**。引数ごと受け取れないことを固定する。
-  """
-  for node in ast.parse(_read(LC_PARAMS_PY)).body:
-    if isinstance(node, ast.FunctionDef) and node.name == 'read':
-      names = [a.arg for a in node.args.args]
-      assert names == ['key'], f"read() が {names} を取る。Params を渡せると焼いた端末で壊れる"
-      return
-  pytest.fail('lane_centering_params.py に read() が無い')
+  for rel in ('openpilot/selfdrive/controls/controlsd.py', MICI_TOGGLES_PY, 'openpilot/selfdrive/ui/sunnypilot/ui_state.py'):
+    src = _read(rel)
+    assert 'lane_centering' not in src and 'centering_exclusive' not in src, f'{rel} に Lane Centering の配線が戻っている'
+  for rel in ('openpilot/sunnypilot/selfdrive/controls/lib/lane_centering.py',
+              'openpilot/sunnypilot/selfdrive/controls/lib/lane_centering_params.py',
+              'openpilot/selfdrive/ui/mici/widgets/lane_centering.py'):
+    assert not (REPO_ROOT / rel).exists(), f'{rel} が戻っている'
 
 
 # ===========================================================================
@@ -897,9 +795,7 @@ GS_TOUCHED_FILES = [
   LONGCONTROL_PY, DRIVE_HELPERS_PY, LONG_MPC_PY,
   MODELD_PY, NNLC_PY, TORQUE_EXT_BASE_PY,
   SCC_VISION_PY, SCC_MAP_PY,
-  LC_PY, LC_PARAMS_PY,
   MICI_MODELS_PY, MICI_TOGGLES_PY,
-  'openpilot/selfdrive/ui/mici/widgets/lane_centering.py',
   'openpilot/selfdrive/controls/controlsd.py',
   'openpilot/selfdrive/controls/lib/latcontrol_torque.py',
   'openpilot/sunnypilot/selfdrive/controls/lib/latcontrol_torque_ext.py',
@@ -1199,6 +1095,21 @@ def test_modeld_restart_on_crash_survives():
   assert re.search(r'RESTART_BACKOFF\s*\*\s*\(\s*2\s*\*\*\s*self\.crash_count\s*\)', src), '倍々 backoff が落ちている'
   assert re.search(r'now - self\.last_start_t > self\.CRASH_FORGET', src), \
     '忘却の基準が「生きられた時間」でなくなっている (最後のクラッシュ基準だと待ちが伸びない)'
+  # 11-21 Fable review: PythonProcess.start() が起動時刻を残さず、Python プロセス (locationd など) では忘却が一度も成立しなかった
+  assert len(re.findall(r'self\.proc\.start\(\)\s*\n(?:\s*#.*\n)*\s*self\.last_start_t = time\.monotonic\(\)', src)) >= 2, \
+    'NativeProcess / PythonProcess のどちらかが start() で last_start_t を更新していない'
+
+
+def test_modeld_nonfinite_output_is_capped():
+  """11-21 Fable review: 非有限の出力は 1 フレーム捨てて走り続ける (09-01) が、連続したら落ちて再起動に任せる。
+
+  上限が無いと、毎フレーム NaN になったとき modeld は生きたまま何も publish しない (manager からは正常に見える)。
+  """
+  assert 2 <= _literal(MODELD_PY, 'NONFINITE_MAX_FRAMES') <= 20, '上限が 1 (= 上流の即 raise) か、1 秒超 (= 無言の時間が長い)'
+  src = _read(MODELD_PY)
+  capped = (r'self\.nonfinite_frames \+= 1\s*\n\s*if self\.nonfinite_frames >= NONFINITE_MAX_FRAMES:\s*\n\s*raise RuntimeError' +
+            r'[\s\S]{0,200}?return None\s*\n\s*self\.nonfinite_frames = 0')
+  assert re.search(capped, src), '非有限フレームの連続上限 (数える → 上限で raise → 有限なら 0 に戻す) が崩れた'
 
 
 def test_modeld_keeps_raise_and_restart_instead_of_small_fallback():

@@ -3,12 +3,10 @@ from openpilot.cereal import log
 from openpilot.system.ui.widgets.scroller import NavScroller
 from openpilot.selfdrive.ui.mici.widgets.button import BigToggle, BigParamControl
 from openpilot.selfdrive.ui.mici.widgets.personality import PersonalityToggle
-from openpilot.selfdrive.ui.mici.widgets.lane_centering import LaneCenteringChoice, LaneCenteringToggle
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.layouts.settings.common import restart_needed_callback
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.mici.layouts.settings.initial_cruise_speed import InitialCruiseSpeedButton
-from openpilot.sunnypilot.selfdrive.controls.lib import lane_centering_params as lcp
 
 PERSONALITY_TO_INT = log.LongitudinalPersonality.schema.enumerants
 
@@ -27,24 +25,6 @@ class TogglesLayoutMici(NavScroller):
                                                              "Use the steering wheel distance button on supported cars.")
     self._initial_cruise_speed = InitialCruiseSpeedButton()
     self._initial_cruise_speed.set_visible(lambda: ui_state.CP is not None and ui_state.has_longitudinal_control and not ui_state.CP.pcmCruise)
-    # Lane Centering (StarPilot 由来の幾何補正)。⚠ この設定は全部 openpilot の Params ではなく
-    # `/data/params_fork/d` に保存している — params に置くと `clearAll` のホワイトリストから外れて
-    # manager 起動のたびに消えるため。読み書きは lane_centering_params が持つ。
-    self._lane_centering_toggle = LaneCenteringToggle("lane centering", lcp.KEY_ENABLED)
-    # 詳細は親が ON のときだけ出す。⚠ callable を渡すのは、親を押した瞬間に出したいため
-    # (_update_toggles は show_event と engaged 遷移でしか回らない)。
-    self._lane_centering_details = (
-      LaneCenteringChoice("center offset", lcp.KEY_OFFSET, lcp.OFFSET_CHOICES, lcp.offset_label),
-      LaneCenteringChoice("yield to model", lcp.KEY_AUTHORITY, lcp.AUTHORITY_CHOICES, lcp.authority_label),
-      LaneCenteringToggle("pause on signal", lcp.KEY_PAUSE_ON_SIGNAL),
-      LaneCenteringChoice("mid-speed strength", lcp.KEY_MIDSPEED_GAIN,
-                          lcp.MIDSPEED_GAIN_CHOICES, lcp.highspeed_gain_label),
-      LaneCenteringChoice("high-speed strength", lcp.KEY_HIGHSPEED_GAIN,
-                          lcp.HIGHSPEED_GAIN_CHOICES, lcp.highspeed_gain_label),
-      LaneCenteringToggle("one-line fallback", lcp.KEY_ONE_LINE),
-    )
-    for item in self._lane_centering_details:
-      item.set_visible(lambda: self._lane_centering_toggle._checked)
     is_metric_toggle = BigToggle("use metric units", initial_state=ui_state.params.get_bool("IsMetric"), toggle_callback=self._on_metric_toggle)
     ldw_toggle = BigParamControl("lane departure warnings", "IsLdwEnabled",
                                  description="Warn when you drift across a detected lane line.\n" +
@@ -65,8 +45,6 @@ class TogglesLayoutMici(NavScroller):
     self._scroller.add_widgets([
       self._personality_toggle,
       self._initial_cruise_speed,
-      self._lane_centering_toggle,
-      *self._lane_centering_details,
       is_metric_toggle,
       ldw_toggle,
       always_on_dm_toggle,
@@ -94,7 +72,6 @@ class TogglesLayoutMici(NavScroller):
       gui_app.set_show_fps(True)
 
     ui_state.add_engaged_transition_callback(self._update_toggles)
-    self._centering_generation = ui_state.centering_exclusive.generation
 
   def _update_state(self):
     super()._update_state()
@@ -104,11 +81,6 @@ class TogglesLayoutMici(NavScroller):
       if personality != ui_state.personality and ui_state.started:
         self._personality_toggle.set_personality(personality)
       ui_state.personality = personality
-
-    # Blendful を ON にして Lane Centering が倒されたら、開いているこの画面にも映す (逆向きは models 画面が毎 frame 読む)
-    if ui_state.centering_exclusive.generation != self._centering_generation:
-      self._centering_generation = ui_state.centering_exclusive.generation
-      self._lane_centering_toggle.refresh()
 
   def show_event(self):
     super().show_event()
@@ -128,9 +100,3 @@ class TogglesLayoutMici(NavScroller):
     # Refresh toggles from params to mirror external changes
     for key, item in self._refresh_toggles:
       item.set_checked(ui_state.params.get_bool(key))
-
-    # Lane Centering は Params ではなく `/data/params_fork/d` に保存しているので自前で取り込む。
-    # SSH で直接書かれた場合もここで画面に反映される。
-    self._lane_centering_toggle.refresh()
-    for item in self._lane_centering_details:
-      item.refresh()

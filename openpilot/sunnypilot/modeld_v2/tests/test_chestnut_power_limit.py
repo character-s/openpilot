@@ -151,7 +151,7 @@ def test_module_scope_imports_stay_in_the_stdlib():
   """⚠ このテスト自体が PC で回る状態を守る見張り。
 
   `openpilot.common.swaglog` は zmq を引くので、モジュールスコープで import すると
-  **PC では import すらできなくなる** (`lane_centering_params.py` が同じ罠を docstring で警告している)。
+  **PC では import すらできなくなる**。
   ログは `_log()` の中で遅延 import すること。
   """
   roots = _module_scope_import_roots()

@@ -183,13 +183,17 @@ def capture(kind: str, out_dir: str, summary: dict) -> str:
   return path
 
 
-def prune(out_dir: str, keep: int = KEEP) -> None:
+def prune(out_dir: str, keep: int = KEEP, protect: str | None = None) -> None:
   # ⚠ 名前 (日時) では並べない: 起動直後は RTC 既定値で 07-28 に化けるので、新しいものほど古い名前になりうる
+  # ⚠ mtime も同じ時計なので、時計が戻ったブートで書いた分は一番古く見える。今書いたもの (protect) は消さない
+  keep_name = os.path.basename(os.path.normpath(protect)) if protect else None
   try:
-    dirs = sorted((d for d in os.listdir(out_dir) if os.path.isdir(os.path.join(out_dir, d))),
+    dirs = sorted((d for d in os.listdir(out_dir) if os.path.isdir(os.path.join(out_dir, d)) and d != keep_name),
                   key=lambda d: os.path.getmtime(os.path.join(out_dir, d)))
   except FileNotFoundError:
     return
+  if keep_name is not None:
+    keep -= 1
   for d in dirs[:-keep] if keep > 0 else dirs:
     shutil.rmtree(os.path.join(out_dir, d), ignore_errors=True)
 
@@ -241,7 +245,7 @@ class LagSnapshot:
     try:
       os.makedirs(self.out_dir, exist_ok=True)
       path = self.capture_fn(kind, self.out_dir, summary)
-      prune(self.out_dir)
+      prune(self.out_dir, protect=path)
       self.log_event('lag snapshot', path=path, **summary)
     except Exception as e:
       try:

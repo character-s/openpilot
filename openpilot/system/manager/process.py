@@ -219,6 +219,9 @@ class PythonProcess(ManagerProcess):
     cloudlog.info(f"starting python {self.module}")
     self.proc = Process(name=self.name, target=self.launcher, args=(self.module, self.name))
     self.proc.start()
+    # ⚠ NativeProcess と同じく起動時刻を残す。無いと reap_if_crashed の「CRASH_FORGET 生きられたら忘れる」が
+    #   Python プロセスでは一度も成立せず、crash_count が増える一方で待ちが RESTART_BACKOFF_MAX に張り付く
+    self.last_start_t = time.monotonic()
     self.shutting_down = False
 
 

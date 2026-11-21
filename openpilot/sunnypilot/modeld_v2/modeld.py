@@ -71,6 +71,10 @@ LONG_SMOOTH_SECONDS_MAX = 0.15
 # GS450h: tinygrad takes /tmp/am_usb:*.lock with LOCK_EX|LOCK_NB; the only other taker is a previous
 # modeld instance still exiting, so a short retry loop is the fix (see _load_with_retry).
 EGPU_LOAD_ATTEMPTS = 5  # total attempts, not retries
+# GS450h (11-21 Fable review): 非有限の出力は 1 フレーム捨てて走り続けるが、連続したら自分で落ちる。
+# 上限が無いと、GPU 側の状態が壊れて毎フレーム NaN になったとき modeld は生きたまま何も publish しなくなる
+# (manager からは正常に見えるので再起動されない)。落ちれば restart_on_crash が big を取り直す。
+NONFINITE_MAX_FRAMES = 10  # 20Hz で 0.5 秒
 EGPU_LOCK_RETRY_WAIT = 3.0  # [s] between attempts (attempts x wait must stay well inside BIG_MODEL_TIMEOUT)
 
 
@@ -261,6 +265,7 @@ class ModelState(ModelStateBase):
 
   def __init__(self, cam_w: int, cam_h: int, chestnut: bool = False):
     ModelStateBase.__init__(self)
+    self.nonfinite_frames = 0  # 非有限の出力が何フレーム続いているか (NONFINITE_MAX_FRAMES)
 
     env_pkl = os.environ.get('COMBINED_MODEL_PKL')
     if env_pkl and os.path.exists(env_pkl):
@@ -369,8 +374,12 @@ class ModelState(ModelStateBase):
       model_output = raw_outputs.numpy().flatten()
       if self.chestnut and not np.all(np.isfinite(model_output)):
         # GS450h: 上流はここで raise するが、1 フレーム捨てるだけで走行は続けられる (09-01 user 判断)。
+        self.nonfinite_frames += 1
+        if self.nonfinite_frames >= NONFINITE_MAX_FRAMES:
+          raise RuntimeError(f"model output not finite for {self.nonfinite_frames} frames in a row")
         cloudlog.error("model output not finite, dropping frame")
         return None
+      self.nonfinite_frames = 0
       sliced = {k: model_output[np.newaxis, v] for k, v in self.vision_output_slices.items()}
       outputs = self.parser.parse_outputs(sliced)
       if 'prev_feat' in self.numpy_inputs and 'hidden_state' in self.vision_output_slices:

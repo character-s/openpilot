@@ -110,3 +110,19 @@ def test_prune_keeps_newest_by_mtime(tmp_path):
   left = sorted(p.name for p in tmp_path.iterdir())
   assert len(left) == ls.KEEP
   assert 'name01' in left and f'name{ls.KEEP + 3:02d}' not in left
+
+
+def test_prune_never_deletes_the_snapshot_just_written(tmp_path):
+  """時計が戻ったブート (RTC 既定値) で書いた分は mtime が一番古い。今書いたものを消さない (11-21 Fable review)。"""
+  for i in range(ls.KEEP + 2):
+    d = tmp_path / f'old{i:02d}'
+    d.mkdir()
+    os.utime(d, (5000 + i, 5000 + i))
+  new = tmp_path / 'new'
+  new.mkdir()
+  os.utime(new, (1000, 1000))  # 一番古く見える
+  ls.prune(str(tmp_path), protect=str(new))
+  left = sorted(p.name for p in tmp_path.iterdir())
+  assert 'new' in left
+  assert len(left) == ls.KEEP
+  assert 'old00' not in left and f'old{ls.KEEP + 1:02d}' in left

@@ -16,7 +16,7 @@ chestnut の推論設計点 100W を大きく超えた値が既定になって�
 性能を削る操作ではない。
 
 ⚠ **値の置き場は `/data/params_fork/d` で openpilot の Params ではない**。理由は
-`lane_centering_params.py` の docstring と同じ = `common/params.cc` の `clearAll` が
+`common/params.cc` の `clearAll` が
 ホワイトリストに無いキーを manager 起動のたびに消すため (`.so` を焼き直さない限り載らない)。
 ⇒ **c4 上でファイルを置くだけで値を変えられる** = 再配信なしで 80 → 60 を試せる。
 
@@ -30,14 +30,14 @@ issue #1964 で判明した「import 時に AMD デバイスを開いて flock �
 自分で再現しかねない (上流の修正は #2033)。
 
 ⚠ **`swaglog` も遅延 import で握る**。PC には zmq が無く `openpilot.common.swaglog` が import できない
-ため、モジュールスコープで引くと**単体テストが PC で回せなくなる** (`lane_centering_params.py` の
-「依存は標準ライブラリだけに保つ」と同じ理由)。⇒ **モジュールスコープの依存は `os` だけ**。
+ため、モジュールスコープで引くと**単体テストが PC で回せなくなる**。
+⇒ **モジュールスコープの依存は `os` だけ**。
 """
 import os
 
 # ⚠ `/data/params` の外であることが要 (モジュール docstring 参照)。
 # ⚠ テストが monkeypatch する差し替え点なので、参照側は `from ... import PARAM_DIR` ではなく
-#    **モジュール属性で** 引くこと (`lane_centering_params.py` と同じ約束)。
+#    **モジュール属性で** 引くこと。
 PARAM_DIR = '/data/params_fork/d'
 
 KEY_POWER_LIMIT = "ChestnutPowerLimit"
@@ -59,7 +59,7 @@ def get_power_limit() -> int:
   """要求する上限 [W]。**0 = stock (絞らない)**。
 
   ⚠ ファイルが無ければ既定値 (= 絞る)。「読めない = 前回値」にはしない
-  (`lane_centering_params.py` と同じ理由 — 項目ごとに世代の違う値が混ざるのを避ける)。
+  (項目ごとに世代の違う値が混ざるのを避ける)。
   """
   try:
     with open(os.path.join(PARAM_DIR, KEY_POWER_LIMIT), 'rb') as f:

@@ -7,8 +7,7 @@
     なり、一番詰める段が一番下に来る。
   そこで「表示の並び」と「保存値」を分け、pill は上流 3 段と同じ縦幅 (0..136) に 4 個詰める。
 
-⚠ 新規ファイルにしているのは `widgets/button.py` が upstream 側のファイルで、追従のたびに衝突しうるため
-  (lane_centering.py と同じ方針)。
+⚠ 新規ファイルにしているのは `widgets/button.py` が upstream 側のファイルで、追従のたびに衝突しうるため。
 """
 from openpilot.common.params import Params
 from openpilot.selfdrive.ui.mici.widgets.button import BigButton, BigMultiToggle
