@@ -77,7 +77,7 @@ static std::map<std::string, service> services = {
   { "carStateSP", {"carStateSP", true, 100.000000, 10, 256000}},
   { "liveMapDataSP", {"liveMapDataSP", true, 1.000000, 1, 256000}},
   { "modelDataV2SP", {"modelDataV2SP", true, 20.000000, 10, 10485760}},
-  { "liveLocationKalman", {"liveLocationKalman", true, 20.000000, -1, 256000}},
+  { "gpsLocationSP", {"gpsLocationSP", true, 20.000000, 20, 256000}},
   { "uiDebug", {"uiDebug", true, 0.000000, 1, 256000}},
   { "testJoystick", {"testJoystick", true, 0.000000, -1, 256000}},
   { "alertDebug", {"alertDebug", true, 20.000000, 5, 256000}},

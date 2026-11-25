@@ -3256,7 +3256,7 @@ struct Event {
     CAR_PARAMS,
     CABIN_CAMERA_STATE,
     DRIVER_MONITORING_STATE_D_E_P_R_E_C_A_T_E_D,
-    LIVE_LOCATION_KALMAN,
+    LIVE_LOCATION_KALMAN_D_E_P_R_E_C_A_T_E_D,
     SENTINEL,
     WIDE_ROAD_CAMERA_STATE,
     MODEL_V2,
@@ -3320,7 +3320,7 @@ struct Event {
     ALERT_DEBUG,
     ONROAD_EVENTS,
     TOUCH,
-    CUSTOM_RESERVED10,
+    GPS_LOCATION_S_P,
     CUSTOM_RESERVED11,
     CUSTOM_RESERVED12,
     CUSTOM_RESERVED13,
@@ -23061,9 +23061,9 @@ public:
   inline bool hasDriverMonitoringStateDEPRECATED() const;
   inline  ::cereal::DriverMonitoringStateDEPRECATED::Reader getDriverMonitoringStateDEPRECATED() const;
 
-  inline bool isLiveLocationKalman() const;
-  inline bool hasLiveLocationKalman() const;
-  inline  ::cereal::LiveLocationKalman::Reader getLiveLocationKalman() const;
+  inline bool isLiveLocationKalmanDEPRECATED() const;
+  inline bool hasLiveLocationKalmanDEPRECATED() const;
+  inline  ::cereal::LiveLocationKalman::Reader getLiveLocationKalmanDEPRECATED() const;
 
   inline bool isSentinel() const;
   inline bool hasSentinel() const;
@@ -23317,9 +23317,9 @@ public:
   inline bool hasTouch() const;
   inline  ::capnp::List< ::cereal::Touch,  ::capnp::Kind::STRUCT>::Reader getTouch() const;
 
-  inline bool isCustomReserved10() const;
-  inline bool hasCustomReserved10() const;
-  inline  ::cereal::CustomReserved10::Reader getCustomReserved10() const;
+  inline bool isGpsLocationSP() const;
+  inline bool hasGpsLocationSP() const;
+  inline  ::cereal::GpsLocationSP::Reader getGpsLocationSP() const;
 
   inline bool isCustomReserved11() const;
   inline bool hasCustomReserved11() const;
@@ -23984,13 +23984,13 @@ public:
   inline void adoptDriverMonitoringStateDEPRECATED(::capnp::Orphan< ::cereal::DriverMonitoringStateDEPRECATED>&& value);
   inline ::capnp::Orphan< ::cereal::DriverMonitoringStateDEPRECATED> disownDriverMonitoringStateDEPRECATED();
 
-  inline bool isLiveLocationKalman();
-  inline bool hasLiveLocationKalman();
-  inline  ::cereal::LiveLocationKalman::Builder getLiveLocationKalman();
-  inline void setLiveLocationKalman( ::cereal::LiveLocationKalman::Reader value);
-  inline  ::cereal::LiveLocationKalman::Builder initLiveLocationKalman();
-  inline void adoptLiveLocationKalman(::capnp::Orphan< ::cereal::LiveLocationKalman>&& value);
-  inline ::capnp::Orphan< ::cereal::LiveLocationKalman> disownLiveLocationKalman();
+  inline bool isLiveLocationKalmanDEPRECATED();
+  inline bool hasLiveLocationKalmanDEPRECATED();
+  inline  ::cereal::LiveLocationKalman::Builder getLiveLocationKalmanDEPRECATED();
+  inline void setLiveLocationKalmanDEPRECATED( ::cereal::LiveLocationKalman::Reader value);
+  inline  ::cereal::LiveLocationKalman::Builder initLiveLocationKalmanDEPRECATED();
+  inline void adoptLiveLocationKalmanDEPRECATED(::capnp::Orphan< ::cereal::LiveLocationKalman>&& value);
+  inline ::capnp::Orphan< ::cereal::LiveLocationKalman> disownLiveLocationKalmanDEPRECATED();
 
   inline bool isSentinel();
   inline bool hasSentinel();
@@ -24496,13 +24496,13 @@ public:
   inline void adoptTouch(::capnp::Orphan< ::capnp::List< ::cereal::Touch,  ::capnp::Kind::STRUCT>>&& value);
   inline ::capnp::Orphan< ::capnp::List< ::cereal::Touch,  ::capnp::Kind::STRUCT>> disownTouch();
 
-  inline bool isCustomReserved10();
-  inline bool hasCustomReserved10();
-  inline  ::cereal::CustomReserved10::Builder getCustomReserved10();
-  inline void setCustomReserved10( ::cereal::CustomReserved10::Reader value);
-  inline  ::cereal::CustomReserved10::Builder initCustomReserved10();
-  inline void adoptCustomReserved10(::capnp::Orphan< ::cereal::CustomReserved10>&& value);
-  inline ::capnp::Orphan< ::cereal::CustomReserved10> disownCustomReserved10();
+  inline bool isGpsLocationSP();
+  inline bool hasGpsLocationSP();
+  inline  ::cereal::GpsLocationSP::Builder getGpsLocationSP();
+  inline void setGpsLocationSP( ::cereal::GpsLocationSP::Reader value);
+  inline  ::cereal::GpsLocationSP::Builder initGpsLocationSP();
+  inline void adoptGpsLocationSP(::capnp::Orphan< ::cereal::GpsLocationSP>&& value);
+  inline ::capnp::Orphan< ::cereal::GpsLocationSP> disownGpsLocationSP();
 
   inline bool isCustomReserved11();
   inline bool hasCustomReserved11();
@@ -55568,55 +55568,55 @@ inline ::capnp::Orphan< ::cereal::DriverMonitoringStateDEPRECATED> Event::Builde
       ::capnp::bounded<0>() * ::capnp::POINTERS));
 }
 
-inline bool Event::Reader::isLiveLocationKalman() const {
-  return which() == Event::LIVE_LOCATION_KALMAN;
+inline bool Event::Reader::isLiveLocationKalmanDEPRECATED() const {
+  return which() == Event::LIVE_LOCATION_KALMAN_D_E_P_R_E_C_A_T_E_D;
 }
-inline bool Event::Builder::isLiveLocationKalman() {
-  return which() == Event::LIVE_LOCATION_KALMAN;
+inline bool Event::Builder::isLiveLocationKalmanDEPRECATED() {
+  return which() == Event::LIVE_LOCATION_KALMAN_D_E_P_R_E_C_A_T_E_D;
 }
-inline bool Event::Reader::hasLiveLocationKalman() const {
-  if (which() != Event::LIVE_LOCATION_KALMAN) return false;
+inline bool Event::Reader::hasLiveLocationKalmanDEPRECATED() const {
+  if (which() != Event::LIVE_LOCATION_KALMAN_D_E_P_R_E_C_A_T_E_D) return false;
   return !_reader.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
 }
-inline bool Event::Builder::hasLiveLocationKalman() {
-  if (which() != Event::LIVE_LOCATION_KALMAN) return false;
+inline bool Event::Builder::hasLiveLocationKalmanDEPRECATED() {
+  if (which() != Event::LIVE_LOCATION_KALMAN_D_E_P_R_E_C_A_T_E_D) return false;
   return !_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
 }
-inline  ::cereal::LiveLocationKalman::Reader Event::Reader::getLiveLocationKalman() const {
-  KJ_IREQUIRE((which() == Event::LIVE_LOCATION_KALMAN),
+inline  ::cereal::LiveLocationKalman::Reader Event::Reader::getLiveLocationKalmanDEPRECATED() const {
+  KJ_IREQUIRE((which() == Event::LIVE_LOCATION_KALMAN_D_E_P_R_E_C_A_T_E_D),
               "Must check which() before get()ing a union member.");
   return ::capnp::_::PointerHelpers< ::cereal::LiveLocationKalman>::get(_reader.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS));
 }
-inline  ::cereal::LiveLocationKalman::Builder Event::Builder::getLiveLocationKalman() {
-  KJ_IREQUIRE((which() == Event::LIVE_LOCATION_KALMAN),
+inline  ::cereal::LiveLocationKalman::Builder Event::Builder::getLiveLocationKalmanDEPRECATED() {
+  KJ_IREQUIRE((which() == Event::LIVE_LOCATION_KALMAN_D_E_P_R_E_C_A_T_E_D),
               "Must check which() before get()ing a union member.");
   return ::capnp::_::PointerHelpers< ::cereal::LiveLocationKalman>::get(_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS));
 }
-inline void Event::Builder::setLiveLocationKalman( ::cereal::LiveLocationKalman::Reader value) {
+inline void Event::Builder::setLiveLocationKalmanDEPRECATED( ::cereal::LiveLocationKalman::Reader value) {
   _builder.setDataField<Event::Which>(
-      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::LIVE_LOCATION_KALMAN);
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::LIVE_LOCATION_KALMAN_D_E_P_R_E_C_A_T_E_D);
   ::capnp::_::PointerHelpers< ::cereal::LiveLocationKalman>::set(_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS), value);
 }
-inline  ::cereal::LiveLocationKalman::Builder Event::Builder::initLiveLocationKalman() {
+inline  ::cereal::LiveLocationKalman::Builder Event::Builder::initLiveLocationKalmanDEPRECATED() {
   _builder.setDataField<Event::Which>(
-      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::LIVE_LOCATION_KALMAN);
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::LIVE_LOCATION_KALMAN_D_E_P_R_E_C_A_T_E_D);
   return ::capnp::_::PointerHelpers< ::cereal::LiveLocationKalman>::init(_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS));
 }
-inline void Event::Builder::adoptLiveLocationKalman(
+inline void Event::Builder::adoptLiveLocationKalmanDEPRECATED(
     ::capnp::Orphan< ::cereal::LiveLocationKalman>&& value) {
   _builder.setDataField<Event::Which>(
-      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::LIVE_LOCATION_KALMAN);
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::LIVE_LOCATION_KALMAN_D_E_P_R_E_C_A_T_E_D);
   ::capnp::_::PointerHelpers< ::cereal::LiveLocationKalman>::adopt(_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS), kj::mv(value));
 }
-inline ::capnp::Orphan< ::cereal::LiveLocationKalman> Event::Builder::disownLiveLocationKalman() {
-  KJ_IREQUIRE((which() == Event::LIVE_LOCATION_KALMAN),
+inline ::capnp::Orphan< ::cereal::LiveLocationKalman> Event::Builder::disownLiveLocationKalmanDEPRECATED() {
+  KJ_IREQUIRE((which() == Event::LIVE_LOCATION_KALMAN_D_E_P_R_E_C_A_T_E_D),
               "Must check which() before get()ing a union member.");
   return ::capnp::_::PointerHelpers< ::cereal::LiveLocationKalman>::disown(_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS));
@@ -59024,57 +59024,57 @@ inline ::capnp::Orphan< ::capnp::List< ::cereal::Touch,  ::capnp::Kind::STRUCT>>
       ::capnp::bounded<0>() * ::capnp::POINTERS));
 }
 
-inline bool Event::Reader::isCustomReserved10() const {
-  return which() == Event::CUSTOM_RESERVED10;
+inline bool Event::Reader::isGpsLocationSP() const {
+  return which() == Event::GPS_LOCATION_S_P;
 }
-inline bool Event::Builder::isCustomReserved10() {
-  return which() == Event::CUSTOM_RESERVED10;
+inline bool Event::Builder::isGpsLocationSP() {
+  return which() == Event::GPS_LOCATION_S_P;
 }
-inline bool Event::Reader::hasCustomReserved10() const {
-  if (which() != Event::CUSTOM_RESERVED10) return false;
+inline bool Event::Reader::hasGpsLocationSP() const {
+  if (which() != Event::GPS_LOCATION_S_P) return false;
   return !_reader.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
 }
-inline bool Event::Builder::hasCustomReserved10() {
-  if (which() != Event::CUSTOM_RESERVED10) return false;
+inline bool Event::Builder::hasGpsLocationSP() {
+  if (which() != Event::GPS_LOCATION_S_P) return false;
   return !_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
 }
-inline  ::cereal::CustomReserved10::Reader Event::Reader::getCustomReserved10() const {
-  KJ_IREQUIRE((which() == Event::CUSTOM_RESERVED10),
+inline  ::cereal::GpsLocationSP::Reader Event::Reader::getGpsLocationSP() const {
+  KJ_IREQUIRE((which() == Event::GPS_LOCATION_S_P),
               "Must check which() before get()ing a union member.");
-  return ::capnp::_::PointerHelpers< ::cereal::CustomReserved10>::get(_reader.getPointerField(
+  return ::capnp::_::PointerHelpers< ::cereal::GpsLocationSP>::get(_reader.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS));
 }
-inline  ::cereal::CustomReserved10::Builder Event::Builder::getCustomReserved10() {
-  KJ_IREQUIRE((which() == Event::CUSTOM_RESERVED10),
+inline  ::cereal::GpsLocationSP::Builder Event::Builder::getGpsLocationSP() {
+  KJ_IREQUIRE((which() == Event::GPS_LOCATION_S_P),
               "Must check which() before get()ing a union member.");
-  return ::capnp::_::PointerHelpers< ::cereal::CustomReserved10>::get(_builder.getPointerField(
+  return ::capnp::_::PointerHelpers< ::cereal::GpsLocationSP>::get(_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS));
 }
-inline void Event::Builder::setCustomReserved10( ::cereal::CustomReserved10::Reader value) {
+inline void Event::Builder::setGpsLocationSP( ::cereal::GpsLocationSP::Reader value) {
   _builder.setDataField<Event::Which>(
-      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::CUSTOM_RESERVED10);
-  ::capnp::_::PointerHelpers< ::cereal::CustomReserved10>::set(_builder.getPointerField(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::GPS_LOCATION_S_P);
+  ::capnp::_::PointerHelpers< ::cereal::GpsLocationSP>::set(_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS), value);
 }
-inline  ::cereal::CustomReserved10::Builder Event::Builder::initCustomReserved10() {
+inline  ::cereal::GpsLocationSP::Builder Event::Builder::initGpsLocationSP() {
   _builder.setDataField<Event::Which>(
-      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::CUSTOM_RESERVED10);
-  return ::capnp::_::PointerHelpers< ::cereal::CustomReserved10>::init(_builder.getPointerField(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::GPS_LOCATION_S_P);
+  return ::capnp::_::PointerHelpers< ::cereal::GpsLocationSP>::init(_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS));
 }
-inline void Event::Builder::adoptCustomReserved10(
-    ::capnp::Orphan< ::cereal::CustomReserved10>&& value) {
+inline void Event::Builder::adoptGpsLocationSP(
+    ::capnp::Orphan< ::cereal::GpsLocationSP>&& value) {
   _builder.setDataField<Event::Which>(
-      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::CUSTOM_RESERVED10);
-  ::capnp::_::PointerHelpers< ::cereal::CustomReserved10>::adopt(_builder.getPointerField(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::GPS_LOCATION_S_P);
+  ::capnp::_::PointerHelpers< ::cereal::GpsLocationSP>::adopt(_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS), kj::mv(value));
 }
-inline ::capnp::Orphan< ::cereal::CustomReserved10> Event::Builder::disownCustomReserved10() {
-  KJ_IREQUIRE((which() == Event::CUSTOM_RESERVED10),
+inline ::capnp::Orphan< ::cereal::GpsLocationSP> Event::Builder::disownGpsLocationSP() {
+  KJ_IREQUIRE((which() == Event::GPS_LOCATION_S_P),
               "Must check which() before get()ing a union member.");
-  return ::capnp::_::PointerHelpers< ::cereal::CustomReserved10>::disown(_builder.getPointerField(
+  return ::capnp::_::PointerHelpers< ::cereal::GpsLocationSP>::disown(_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS));
 }
 

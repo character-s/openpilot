@@ -862,15 +862,15 @@ struct ModelDataV2SP {
   };
 };
 
-struct CustomReserved10 {
-  CustomReserved10() = delete;
+struct GpsLocationSP {
+  GpsLocationSP() = delete;
 
   class Reader;
   class Builder;
   class Pipeline;
 
   struct _capnpPrivate {
-    CAPNP_DECLARE_STRUCT_HEADER(cb9fd56c7057593a, 0, 0)
+    CAPNP_DECLARE_STRUCT_HEADER(cb9fd56c7057593a, 5, 0)
     #if !CAPNP_LITE
     static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
     #endif  // !CAPNP_LITE
@@ -4771,9 +4771,9 @@ private:
 };
 #endif  // !CAPNP_LITE
 
-class CustomReserved10::Reader {
+class GpsLocationSP::Reader {
 public:
-  typedef CustomReserved10 Reads;
+  typedef GpsLocationSP Reads;
 
   Reader() = default;
   inline explicit Reader(::capnp::_::StructReader base): _reader(base) {}
@@ -4788,6 +4788,24 @@ public:
   }
 #endif  // !CAPNP_LITE
 
+  inline double getLatitude() const;
+
+  inline double getLongitude() const;
+
+  inline float getSpeed() const;
+
+  inline float getBearingDeg() const;
+
+  inline float getHorizontalAccuracy() const;
+
+  inline float getBearingAccuracyDeg() const;
+
+  inline bool getHasFix() const;
+
+  inline bool getGpsOK() const;
+
+  inline bool getFused() const;
+
 private:
   ::capnp::_::StructReader _reader;
   template <typename, ::capnp::Kind>
@@ -4800,9 +4818,9 @@ private:
   friend class ::capnp::Orphanage;
 };
 
-class CustomReserved10::Builder {
+class GpsLocationSP::Builder {
 public:
-  typedef CustomReserved10 Builds;
+  typedef GpsLocationSP Builds;
 
   Builder() = delete;  // Deleted to discourage incorrect usage.
                        // You can explicitly initialize to nullptr instead.
@@ -4816,6 +4834,33 @@ public:
   inline ::kj::StringTree toString() const { return asReader().toString(); }
 #endif  // !CAPNP_LITE
 
+  inline double getLatitude();
+  inline void setLatitude(double value);
+
+  inline double getLongitude();
+  inline void setLongitude(double value);
+
+  inline float getSpeed();
+  inline void setSpeed(float value);
+
+  inline float getBearingDeg();
+  inline void setBearingDeg(float value);
+
+  inline float getHorizontalAccuracy();
+  inline void setHorizontalAccuracy(float value);
+
+  inline float getBearingAccuracyDeg();
+  inline void setBearingAccuracyDeg(float value);
+
+  inline bool getHasFix();
+  inline void setHasFix(bool value);
+
+  inline bool getGpsOK();
+  inline void setGpsOK(bool value);
+
+  inline bool getFused();
+  inline void setFused(bool value);
+
 private:
   ::capnp::_::StructBuilder _builder;
   template <typename, ::capnp::Kind>
@@ -4826,9 +4871,9 @@ private:
 };
 
 #if !CAPNP_LITE
-class CustomReserved10::Pipeline {
+class GpsLocationSP::Pipeline {
 public:
-  typedef CustomReserved10 Pipelines;
+  typedef GpsLocationSP Pipelines;
 
   inline Pipeline(decltype(nullptr)): _typeless(nullptr) {}
   inline explicit Pipeline(::capnp::AnyPointer::Pipeline&& typeless)
@@ -9250,6 +9295,132 @@ inline float ModelDataV2SP::Builder::getBlendfulLaneWidth() {
 inline void ModelDataV2SP::Builder::setBlendfulLaneWidth(float value) {
   _builder.setDataField<float>(
       ::capnp::bounded<6>() * ::capnp::ELEMENTS, value);
+}
+
+inline double GpsLocationSP::Reader::getLatitude() const {
+  return _reader.getDataField<double>(
+      ::capnp::bounded<0>() * ::capnp::ELEMENTS);
+}
+
+inline double GpsLocationSP::Builder::getLatitude() {
+  return _builder.getDataField<double>(
+      ::capnp::bounded<0>() * ::capnp::ELEMENTS);
+}
+inline void GpsLocationSP::Builder::setLatitude(double value) {
+  _builder.setDataField<double>(
+      ::capnp::bounded<0>() * ::capnp::ELEMENTS, value);
+}
+
+inline double GpsLocationSP::Reader::getLongitude() const {
+  return _reader.getDataField<double>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS);
+}
+
+inline double GpsLocationSP::Builder::getLongitude() {
+  return _builder.getDataField<double>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS);
+}
+inline void GpsLocationSP::Builder::setLongitude(double value) {
+  _builder.setDataField<double>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS, value);
+}
+
+inline float GpsLocationSP::Reader::getSpeed() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS);
+}
+
+inline float GpsLocationSP::Builder::getSpeed() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS);
+}
+inline void GpsLocationSP::Builder::setSpeed(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS, value);
+}
+
+inline float GpsLocationSP::Reader::getBearingDeg() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS);
+}
+
+inline float GpsLocationSP::Builder::getBearingDeg() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS);
+}
+inline void GpsLocationSP::Builder::setBearingDeg(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS, value);
+}
+
+inline float GpsLocationSP::Reader::getHorizontalAccuracy() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<6>() * ::capnp::ELEMENTS);
+}
+
+inline float GpsLocationSP::Builder::getHorizontalAccuracy() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<6>() * ::capnp::ELEMENTS);
+}
+inline void GpsLocationSP::Builder::setHorizontalAccuracy(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<6>() * ::capnp::ELEMENTS, value);
+}
+
+inline float GpsLocationSP::Reader::getBearingAccuracyDeg() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<7>() * ::capnp::ELEMENTS);
+}
+
+inline float GpsLocationSP::Builder::getBearingAccuracyDeg() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<7>() * ::capnp::ELEMENTS);
+}
+inline void GpsLocationSP::Builder::setBearingAccuracyDeg(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<7>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool GpsLocationSP::Reader::getHasFix() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<256>() * ::capnp::ELEMENTS);
+}
+
+inline bool GpsLocationSP::Builder::getHasFix() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<256>() * ::capnp::ELEMENTS);
+}
+inline void GpsLocationSP::Builder::setHasFix(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<256>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool GpsLocationSP::Reader::getGpsOK() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<257>() * ::capnp::ELEMENTS);
+}
+
+inline bool GpsLocationSP::Builder::getGpsOK() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<257>() * ::capnp::ELEMENTS);
+}
+inline void GpsLocationSP::Builder::setGpsOK(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<257>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool GpsLocationSP::Reader::getFused() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<258>() * ::capnp::ELEMENTS);
+}
+
+inline bool GpsLocationSP::Builder::getFused() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<258>() * ::capnp::ELEMENTS);
+}
+inline void GpsLocationSP::Builder::setFused(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<258>() * ::capnp::ELEMENTS, value);
 }
 
 }  // namespace
